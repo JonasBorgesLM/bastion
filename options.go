@@ -1,0 +1,87 @@
+package bastion
+
+import "time"
+
+// Provisional defaults. TODO(B4): each of these is a number nobody has
+// justified yet. They are written down here rather than scattered through New
+// so that the argument about them happens in one place, and they are settled by
+// the ADR that closes the "static or adaptive failure threshold" question in
+// docs/adr/README.md, before v1.
+const (
+	defaultFailureThreshold = 5
+	defaultOpenTimeout      = 30 * time.Second
+	defaultHalfOpenMaxCalls = 1
+)
+
+// options accumulates [Option] values before [New] validates them and freezes
+// them into a [Breaker].
+type options struct {
+	failureThreshold int
+	openTimeout      time.Duration
+	halfOpenMaxCalls int
+	isFailure        func(error) bool
+	clock            Clock
+	hooks            Hooks
+}
+
+// Option configures a [Breaker] at construction. See [New].
+type Option func(*options)
+
+// WithFailureThreshold sets how many consecutive failures close the circuit
+// into [StateOpen] (FR-02). Must be positive; [New] returns [ErrInvalidConfig]
+// otherwise.
+func WithFailureThreshold(n int) Option {
+	return func(o *options) { o.failureThreshold = n }
+}
+
+// WithOpenTimeout sets how long the circuit stays in [StateOpen] before a probe
+// call is admitted (FR-01). The elapsed time is evaluated on the next call, so
+// nothing happens at the instant the timeout expires and no goroutine is
+// waiting for it.
+func WithOpenTimeout(d time.Duration) Option {
+	return func(o *options) { o.openTimeout = d }
+}
+
+// WithHalfOpenMaxCalls bounds how many probe calls [StateHalfOpen] admits
+// before further calls are rejected with [ErrTooManyRequests] (FR-01).
+func WithHalfOpenMaxCalls(n int) Option {
+	return func(o *options) { o.halfOpenMaxCalls = n }
+}
+
+// WithIsFailure sets the classifier that decides whether an error counts
+// against the circuit (FR-04). It is the injection point for a host's own error
+// taxonomy: an HTTP 404 or a validation error is an answer from a healthy
+// dependency, and counting it as a failure opens a circuit on a working
+// service.
+//
+// There is no default yet, and this comment will say what it is once there is
+// one. The default classifier is decided by the open question "how context
+// cancellation is accounted for" in docs/adr/README.md and implemented in B2,
+// because what a nil classifier does and what a cancelled context does are the
+// same decision looked at from two sides.
+func WithIsFailure(fn func(error) bool) Option {
+	return func(o *options) { o.isFailure = fn }
+}
+
+// WithClock substitutes the [Clock] the breaker reads (NFR-05). The default is
+// [SystemClock]. Tests pass a fake so that a transition is caused by advancing
+// time rather than by waiting for it.
+func WithClock(c Clock) Option {
+	return func(o *options) { o.clock = c }
+}
+
+// WithHooks sets the observability handlers (FR-09). Handlers run synchronously
+// on the calling goroutine and must not block (IR-02).
+func WithHooks(h Hooks) Option {
+	return func(o *options) { o.hooks = h }
+}
+
+// TODO(B5): the fallback of FR-08 is not an Option, and the reason is worth
+// recording rather than rediscovering. A fallback produces the call's return
+// value, so it is typed T — and a Go method cannot introduce a type parameter
+// its receiver does not already have. Configuring it on the Breaker would force
+// either a Breaker[T], which defeats one named breaker guarding a dependency
+// called from several call sites with several return types, or an interface{}
+// round trip, which is what generics are here to avoid. The likely answer is
+// that the fallback is an argument at the call site, where its type is known.
+// It needs an ADR before B5, not a decision made in passing.
