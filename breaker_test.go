@@ -326,6 +326,35 @@ func TestExecute_HonorsACallerSuppliedClassifier(t *testing.T) {
 	}
 }
 
+// hooks.go: "An error the classifier excused... arrive[s] here with Counted
+// false." Checked directly, not just inferred from State() staying Closed.
+func TestExecute_OnCallReportsCountedFalseForAnExcusedError(t *testing.T) {
+	clock := newFakeClock()
+	notFound := errors.New("404: not found")
+	var calls []bastion.CallEvent
+	b, err := bastion.New("dep",
+		bastion.WithClock(clock),
+		bastion.WithIsFailure(func(err error) bool { return !errors.Is(err, notFound) }),
+		bastion.WithHooks(bastion.Hooks{
+			OnCall: func(_ context.Context, ev bastion.CallEvent) { calls = append(calls, ev) },
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+		return 0, notFound
+	})
+
+	if len(calls) != 1 {
+		t.Fatalf("got %d OnCall events, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].Counted {
+		t.Fatalf("call event = %+v, want Counted=false for an excused error", calls[0])
+	}
+}
+
 // CallEvent.Err for a panicking call carries a synthesized error describing
 // the panic, not nil -- the field is typed error and a recovered value is
 // not one. The caller, separately, still gets the exact original value via
