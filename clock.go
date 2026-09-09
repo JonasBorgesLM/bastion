@@ -28,6 +28,6 @@ type SystemClock struct{}
 // Now returns time.Now.
 func (SystemClock) Now() time.Time { return time.Now() }
 
-// TODO(B1): the fake clock used by the transition tests lives in
-// fakeclock_test.go, not here. A test double exported from the library is a
-// double the library then has to keep compatible.
+// The fake clock the transition tests drive lives in fakeclock_test.go, not
+// here. A test double exported from the library is a double the library then
+// has to keep compatible.
