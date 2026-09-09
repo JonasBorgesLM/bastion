@@ -1,0 +1,376 @@
+# CI for a single-module Go library.
+#
+# Adapted from foundation/kit/ci/go-ci.yml. Two things it does NOT carry, and
+# both omissions are deliberate: there is no module matrix and no
+# satellite-resolution job, because bastion is one module. Add both the day it
+# stops being one -- `go test ./...` at the root does not descend into a
+# submodule, so a submodule without its own job is simply never built.
+#
+# Every tool is pinned to an exact version. `tool@latest` in CI is not
+# reproducible -- today's green build says nothing about tomorrow's -- and it
+# hands whoever controls that tool's repository code execution in this pipeline.
+# In a library whose dependency surface is a stated property, that would be
+# indefensible.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  schedule:
+    # Weekly, so a newly published vulnerability is found by govulncheck rather
+    # than by a user.
+    - cron: "41 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The library floor (NFR-07). Build and test happen here, because this is the
+  # version the module promises its importers.
+  GO_VERSION: "1.24"
+  # The newest supported toolchain. govulncheck runs here: a library verified
+  # only at its floor is scanned against a standard library that no longer
+  # receives fixes, which reports findings no change to this repository can
+  # resolve.
+  GO_SUPPORTED_VERSION: "stable"
+  # golangci-lint typechecks against the stdlib of the toolchain it was itself
+  # built with, regardless of the module's `go` directive, and refuses to run
+  # against a newer one. This pin and LINT_VERSION move together or neither
+  # moves.
+  LINT_GO_VERSION: "1.26"
+  LINT_VERSION: "v2.12.2"
+  GOSEC_VERSION: "v2.28.0"
+  GOVULNCHECK_VERSION: "v1.7.0"
+  # Fail rather than silently fetch a module whose checksum is not in the
+  # transparency log, and fail rather than silently rewrite go.mod.
+  GOFLAGS: -mod=readonly
+  GOSUMDB: sum.golang.org
+
+jobs:
+  # -------------------------------------------------------------- build ----
+  build:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.mod
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race is not optional here. NFR-01 is the claim that the whole API is
+      # safe under concurrent use, and a breaker is shared by every goroutine
+      # calling the dependency it guards.
+      - name: go test -race
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Report coverage
+        run: |
+          if [ -s coverage.out ]; then
+            go tool cover -func=coverage.out | tail -1
+          else
+            echo "no coverage profile yet (module has no tests)"
+          fi
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: warn
+
+  # --------------------------------------------- dependency boundaries ----
+  #
+  # The project-specific guard job -- the part of a pipeline that is actually
+  # worth having and cannot be templated. Both claims below are asserted
+  # mechanically rather than trusted, because a convention CI does not check is
+  # a preference.
+  boundaries:
+    name: zero dependencies, and no net/http
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.mod
+
+      # NFR-03. The standard-library-only claim is this module's most
+      # load-bearing promise: a resilience library is imported by everything,
+      # so anything it depends on is depended on by everything.
+      - name: go.mod must have no requires
+        run: |
+          if grep -qE '^\s*require' go.mod; then
+            echo "::error file=go.mod::this module has acquired a dependency; it must depend on the standard library only (NFR-03)"
+            grep -nE '^\s*require' -A20 go.mod
+            exit 1
+          fi
+          echo "go.mod declares no dependencies"
+
+      - name: There must be no go.sum
+        run: |
+          if [ -f go.sum ]; then
+            echo "::error file=go.sum::a go.sum exists, so this module has dependencies (NFR-03)"
+            cat go.sum
+            exit 1
+          fi
+          echo "no go.sum"
+
+      # IR-01. bastion protects a call, whatever transport carries it. The day
+      # it imports net/http the abstraction has started to lie, and the fix is
+      # a subpackage or a separate module -- not a relaxation of this check.
+      - name: The library must not import net/http
+        run: |
+          if go list -deps ./... | grep -qx 'net/http'; then
+            echo "::error::the library imports net/http; it protects a call, not an HTTP request (IR-01)"
+            go list -deps ./... | grep -n 'net/http'
+            exit 1
+          fi
+          echo "net/http is not in the dependency graph"
+
+  # --------------------------------------------------------------- lint ----
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.LINT_GO_VERSION }}
+          cache-dependency-path: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # v9 of the action is the line that runs golangci-lint v2; earlier majors
+      # install v1, which rejects .golangci.yml's `version: "2"` schema.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.LINT_VERSION }}
+
+      - name: Install gosec ${{ env.GOSEC_VERSION }}
+        run: go install github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }}
+
+      - name: gosec
+        # -tests scans the test files too: a case that no longer compiles is a
+        # case that is no longer being run.
+        run: gosec -tests -exclude-generated ./...
+
+  # ------------------------------------------------------- govulncheck ----
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # Deliberately not GO_VERSION -- see the comment on it above.
+          go-version: ${{ env.GO_SUPPORTED_VERSION }}
+          cache-dependency-path: go.mod
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
+          govulncheck ./...
+
+  # --------------------------------------------------------------- docs ----
+  #
+  # Requirements are cited by id from ADRs, godoc, tests and commit messages,
+  # and a citation pointing at nothing is how a reader ends up implementing a
+  # requirement that was renumbered.
+  docs:
+    name: documentation is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.mod
+      - name: Run the documentation checks
+        run: ./.github/scripts/check-docs.sh
+
+  # ---------------------------------------------------- ADR immutability ----
+  #
+  # An ADR is never rewritten. It is amended in place with a section naming what
+  # superseded which part, so the reasoning that was current at the time stays
+  # readable.
+  #
+  # That is checkable: an amendment only ADDS lines. A rewrite removes them.
+  adr-immutability:
+    name: accepted ADRs are amended, never rewritten
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: An existing ADR may gain lines, never lose them
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          rewritten=""
+          for f in $(git diff --name-only --diff-filter=M "$base"...HEAD -- 'docs/adr/[0-9]*.md'); do
+            # --numstat is "added<TAB>deleted<TAB>path". A modified ADR with a
+            # non-zero deletion count has had its reasoning edited rather than
+            # extended.
+            deleted=$(git diff --numstat "$base"...HEAD -- "$f" | awk '{print $2}')
+            [ "${deleted:-0}" -gt 0 ] && rewritten="$rewritten $f($deleted lines removed)"
+          done
+          if [ -n "$rewritten" ]; then
+            echo "::error::an accepted ADR was rewritten rather than amended:$rewritten"
+            echo ""
+            echo "A change of mind is a new ADR that supersedes this one, or an"
+            echo "'## Amendment' section appended to it. Editing the original"
+            echo "destroys the reasoning that was current when it was decided,"
+            echo "which is the reason the record exists."
+            echo ""
+            echo "Fixing a typo is the one legitimate case: label the PR"
+            echo "'adr-typo' to skip this check."
+            exit 1
+          fi
+          echo "no accepted ADR lost a line"
+        continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'adr-typo') }}
+
+  # ------------------------------------------------------------ commits ----
+  #
+  # Not about release notes -- it is about `git log` being readable a year from
+  # now by someone who was not here.
+  commits:
+    name: conventional commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Every commit in this PR follows the convention
+        run: |
+          types='feat|fix|docs|test|refactor|perf|build|ci|chore|revert'
+          scopes='breaker|state|retry|clock|hooks|options|errors|adr|docs|deps|ci'
+          pattern="^($types)(\\(($scopes)\\))?!?: .+"
+          base='${{ github.event.pull_request.base.sha }}'
+          bad=0
+
+          while IFS= read -r sha; do
+            subject=$(git log -1 --format=%s "$sha")
+            # A merge commit's subject is generated by the forge, not written.
+            [ "$(git rev-list --no-walk --count --merges "$sha")" -eq 1 ] && continue
+
+            if ! printf '%s' "$subject" | grep -qE "$pattern"; then
+              echo "::error::not a conventional commit: $subject"
+              bad=1
+              continue
+            fi
+            if [ ${#subject} -gt 72 ]; then
+              echo "::error::subject over 72 characters (${#subject}): $subject"
+              bad=1
+            fi
+            case "$subject" in
+              *.) echo "::error::subject ends with a period: $subject"; bad=1 ;;
+            esac
+          done < <(git rev-list "$base"..HEAD)
+
+          if [ "$bad" -ne 0 ]; then
+            echo ""
+            echo "Format:  <type>(<scope>)!: <subject>"
+            echo "Types:   $types"
+            echo "Scopes:  $scopes"
+            echo ""
+            echo "  feat(breaker): open the circuit on the Nth consecutive failure"
+            echo "  fix(retry): abandon the backoff wait when the context is cancelled"
+            echo "  docs(adr): record how context cancellation is accounted for"
+            echo ""
+            echo "Explain WHY in the body -- the diff already says what -- and"
+            echo "cite the requirement or ADR (Refs FR-01, Closes #12)."
+            exit 1
+          fi
+          echo "all commits follow the convention"
+
+      # The PR title becomes the commit subject on a squash merge, so it is
+      # subject to the same rule. A convention enforced on commits and not on
+      # the thing that replaces them is enforced nowhere.
+      - name: The PR title follows the convention
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          types='feat|fix|docs|test|refactor|perf|build|ci|chore|revert'
+          scopes='breaker|state|retry|clock|hooks|options|errors|adr|docs|deps|ci'
+          if ! printf '%s' "$TITLE" | grep -qE "^($types)(\\(($scopes)\\))?!?: .+"; then
+            echo "::error::PR title is not a conventional commit: $TITLE"
+            exit 1
+          fi
+          echo "PR title follows the convention"
+
+  # -------------------------------------------------- dependency review ----
+  #
+  # With NFR-03 in force this should never have anything to review. It stays as
+  # a second tripwire: `boundaries` catches a dependency in go.mod, this one
+  # catches what that dependency would have dragged in.
+  dependency-review:
+    name: dependency review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
+        with:
+          # A new dependency in this repository is a design decision, so
+          # anything with a known vulnerability at any severity fails rather
+          # than being triaged later.
+          fail-on-severity: low
+          # Copyleft would change the terms this library ships under.
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1, LGPL-3.0
+          comment-summary-in-pr: on-failure
+
+  # -------------------------------------------------------------- gate ----
+  #
+  # A single required check to protect the branch with. Branch protection can
+  # only require named jobs, so protecting them individually means adding a job
+  # silently widens the gap between "CI passed" and "everything ran".
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs:
+      - build
+      - boundaries
+      - lint
+      - govulncheck
+      - docs
+      - adr-immutability
+      - commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any dependency failed
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "Upstream results: $results"
+          for r in $results; do
+            # `skipped` is legitimate: PR-only jobs do not run on push.
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::an upstream job reported '$r'"; exit 1 ;;
+            esac
+          done
+          echo "all upstream jobs passed or were skipped"

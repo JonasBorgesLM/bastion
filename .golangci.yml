@@ -1,0 +1,78 @@
+# Strict by intent. bastion's failure modes are quiet ones: a switch over State
+# that silently defaults to Closed turns the breaker into an expensive no-op, an
+# unchecked error on the classification path miscounts a failure, and a missing
+# doc comment on an exported identifier ships a contract that exists only in the
+# author's head. None of those produce a stack trace.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - contextcheck
+    - copyloopvar
+    - dupl
+    - errorlint
+    - exhaustive
+    - gocritic
+    - godot
+    - goconst
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - predeclared
+    - revive
+    - unconvert
+    - unparam
+    - wastedassign
+    - whitespace
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    exhaustive:
+      # State has three values and every switch over it must handle all three.
+      # A missing case falling through to Closed is precisely the bug this
+      # catches, and it is invisible in review.
+      default-signifies-exhaustive: true
+    goconst:
+      ignore-tests: true
+    gocritic:
+      enabled-tags: [diagnostic, performance, style]
+      disabled-checks: [hugeParam, rangeValCopy]
+    govet:
+      enable-all: true
+      disable: [fieldalignment]
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    revive:
+      rules:
+        # The documentation half of "keep the docs current", applied where it
+        # actually decays. Several of this library's contracts live nowhere
+        # else: that hooks are synchronous and must not block (IR-02), that a
+        # cancelled context is neither a success nor a failure (FR-05), that
+        # two breakers sharing a name are still independent (IR-03).
+        - name: exported
+          arguments: [checkPrivateReceivers]
+        - name: package-comments
+
+  exclusions:
+    rules:
+      # Table-driven tests are repetitive by nature, and a test that ignores a
+      # cleanup error is not the risk this configuration exists to catch.
+      - path: _test\.go$
+        linters: [dupl, errcheck, gosec, goconst, unparam]
+
+formatters:
+  enable: [gofmt, goimports]
+  settings:
+    goimports:
+      local-prefixes: [github.com/JonasBorgesLM/bastion]

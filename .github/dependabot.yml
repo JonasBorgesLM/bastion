@@ -1,0 +1,28 @@
+# bastion has no dependencies and is supposed to keep it that way (NFR-03), so
+# the gomod entry below exists mainly as a tripwire: if Dependabot ever opens a
+# pull request against it, something has been added that should not have been.
+# The `boundaries` job in ci.yml fails on the same condition.
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: "deps:"
+
+  # The workflow files themselves. Actions are pinned by major version in
+  # ci.yml; this keeps that pin from going stale, and an action update is a
+  # supply-chain change that deserves the same review as a code dependency.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: "ci:"
