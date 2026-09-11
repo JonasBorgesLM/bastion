@@ -20,15 +20,18 @@ id (`FR-01`, `NFR-05`, `IR-02`…). Decisions live in
 
 ## Current phase
 
-**Pre-implementation.** The package skeleton, CI and conventions are in place;
-no state machine exists yet. Work is grouped B1 through B8 in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each `TODO(Bn)` in the source names
-the phase that closes it.
+**B1 done** — the state machine, `Execute`, and observability hooks (pulled
+forward from B5; see the note at the end of [`hooks.go`](hooks.go)) are
+implemented and tested at 100% coverage. B2 onward are not. Work is grouped
+B1 through B8 in [`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each
+`TODO(Bn)` in the source names the phase that closes it.
 
-Do not implement a phase whose open question is still open. Four of the seven
-questions in [`docs/adr/README.md`](docs/adr/README.md) block B1 through B5, and
-one of them — the entry point's name and signature — cannot be corrected after
-release without breaking every caller.
+Do not implement a phase whose open question is still open. Five questions
+remain in [`docs/adr/README.md`](docs/adr/README.md), blocking B2 through B7;
+[ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
+through
+[ADR-0004](docs/adr/0004-a-stale-half-open-probe-times-out-back-to-open.md)
+record the four that blocked B1 and are now resolved.
 
 ## Repository layout
 

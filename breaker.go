@@ -1,6 +1,7 @@
 package bastion
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -23,8 +24,37 @@ type Breaker struct {
 	clock            Clock
 	hooks            Hooks
 
-	mu    sync.Mutex
+	mu sync.Mutex
+
 	state State
+
+	// consecutiveFailures counts toward failureThreshold while state is
+	// Closed (FR-02). Reset to zero by any success, and by leaving Closed.
+	consecutiveFailures int
+
+	// openedAt is when state most recently became Open — the anchor
+	// effectiveState reads against openTimeout to decide whether a Half-Open
+	// probe is due (FR-01, NFR-05).
+	openedAt time.Time
+
+	// halfOpenInFlight counts probes admitted and not yet completed, bounded
+	// by halfOpenMaxCalls.
+	halfOpenInFlight int
+
+	// halfOpenAdmittedAt is when the current Half-Open window opened — set
+	// exactly once per window, the instant the first probe is admitted. It is
+	// the anchor for ADR-0004's lease: a window whose allowance has been full
+	// for longer than openTimeout is presumed stuck on a probe that will never
+	// return, and is reopened rather than left rejecting forever.
+	halfOpenAdmittedAt time.Time
+
+	// halfOpenGeneration identifies the current Half-Open window. Every probe
+	// admitted into a window is stamped with its generation; a probe whose
+	// generation no longer matches when it completes belongs to a window the
+	// breaker has already moved on from (by lease expiry, or because a
+	// sibling probe already resolved the window), and its outcome is
+	// discarded rather than applied (ADR-0004).
+	halfOpenGeneration int
 }
 
 // New returns a Breaker named name, configured by opts.
@@ -71,43 +101,259 @@ func New(name string, opts ...Option) (*Breaker, error) {
 // Name returns the breaker's name, as given to [New] (FR-10).
 func (b *Breaker) Name() string { return b.name }
 
-// State returns the circuit's current state (FR-13).
+// State returns the circuit's current state (FR-13), including a timeout that
+// has already elapsed: reading State never leaves a stale answer for a caller
+// who has not yet made another call.
 //
-// TODO(B1): this must evaluate the lazy Open to Half-Open transition before
-// answering, or it reports Open for a circuit whose timeout expired and which
-// the next call would admit. Reading a stale answer here is the kind of bug
-// that only shows up in someone's dashboard.
+// State never mutates the breaker and never fires a hook. The transition it
+// computes here is persisted, and reported to [Hooks.OnStateChange], only when
+// [Execute] next actually admits or refuses a call — reading the current state
+// has no side effect to fire a hook *with*, since Hooks take a
+// [context.Context] that a bare read does not have one of.
 func (b *Breaker) State() State {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.state
+	return b.effectiveState(b.clock.Now())
 }
 
-// TODO(B1): the entry point, and the counters it maintains.
+// effectiveState computes what State() should report right now, without
+// mutating any field. Call with b.mu held.
+func (b *Breaker) effectiveState(now time.Time) State {
+	switch b.state {
+	case StateOpen:
+		if now.Sub(b.openedAt) >= b.openTimeout {
+			return StateHalfOpen
+		}
+		return StateOpen
+
+	case StateHalfOpen:
+		if b.halfOpenInFlight >= b.halfOpenMaxCalls &&
+			now.Sub(b.halfOpenAdmittedAt) >= b.openTimeout {
+			// ADR-0004: the outstanding probe(s) have overstayed their lease.
+			return StateOpen
+		}
+		return StateHalfOpen
+
+	default: // StateClosed
+		return StateClosed
+	}
+}
+
+// admission is what admit decides for one call: whether it is admitted, and
+// if so, whether it is a Half-Open probe (and under which generation) so its
+// eventual completion can be attributed correctly, or discarded as stale.
+type admission struct {
+	admitted   bool
+	isProbe    bool
+	generation int
+	state      State // the state the call was admitted or refused under
+	reject     error
+	transition *StateChangeEvent // non-nil if admitting this call itself moved the state
+}
+
+// admit decides whether a call is let through, mutating and persisting any
+// transition that decision depends on. It never invokes caller code and it
+// never fires a hook — Execute does both, after releasing b.mu.
 //
-// The shape under consideration, and the reason it is a function rather than a
-// method: a method cannot introduce a type parameter, so a generic result on a
-// non-generic Breaker has to arrive this way. See the architecture decisions in
-// REQUIREMENTS.md.
+// The transition, if any, is decided by effectiveState — the same function
+// State reads — rather than by a second, independently written time
+// comparison. Two comparisons of the same boundary is how a State() that
+// disagrees with Execute() about whether a timeout has elapsed gets shipped;
+// one comparison, read from two call sites, cannot drift from itself.
+func (b *Breaker) admit(now time.Time) admission {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	eff := b.effectiveState(now)
+	var transition *StateChangeEvent
+	if eff != b.state {
+		from := b.state
+		b.state = eff
+		b.halfOpenGeneration++
+		b.halfOpenInFlight = 0
+		if eff == StateOpen {
+			// ADR-0004: HalfOpen's window overstayed its lease. This call is
+			// refused as Open, exactly like any other Open rejection; the next
+			// call after a fresh openTimeout becomes the next window's probe.
+			b.openedAt = now
+		}
+		// eff == StateHalfOpen (Open's timeout elapsed): halfOpenAdmittedAt is
+		// left unset here and stamped below, by whichever branch actually
+		// admits this call as the window's first probe.
+		transition = &StateChangeEvent{Name: b.name, From: from, To: eff}
+	}
+
+	switch b.state {
+	case StateClosed:
+		return admission{admitted: true, state: StateClosed, transition: transition}
+
+	case StateOpen:
+		return admission{admitted: false, state: StateOpen, reject: ErrOpenState, transition: transition}
+
+	default: // StateHalfOpen
+		if b.halfOpenInFlight < b.halfOpenMaxCalls {
+			if b.halfOpenInFlight == 0 {
+				b.halfOpenAdmittedAt = now
+			}
+			b.halfOpenInFlight++
+			return admission{
+				admitted: true, isProbe: true, generation: b.halfOpenGeneration,
+				state: StateHalfOpen, transition: transition,
+			}
+		}
+		return admission{
+			admitted: false, state: StateHalfOpen, reject: ErrTooManyRequests,
+			transition: transition,
+		}
+	}
+}
+
+// complete records the outcome of a call admit previously admitted, mutating
+// and persisting any transition it causes. Call with adm.admitted true; adm
+// and now come from admit and clock.Now() respectively, at the call site.
+func (b *Breaker) complete(now time.Time, adm admission, failed bool) *StateChangeEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if adm.isProbe {
+		if adm.generation != b.halfOpenGeneration {
+			// ADR-0004: this window was already invalidated — by a lease
+			// expiring, by a sibling probe already resolving it
+			// (WithHalfOpenMaxCalls > 1), or by any other departure from this
+			// window. Every place that moves b.state away from StateHalfOpen
+			// also increments halfOpenGeneration in the same critical section
+			// (see admit's eff != b.state block, and the increment just below
+			// this one) — so a generation match here is proof, not a
+			// coincidence, that b.state is still StateHalfOpen and this
+			// completion is the window's own to resolve.
+			return nil
+		}
+		b.halfOpenInFlight--
+		from := b.state
+		if failed {
+			b.state = StateOpen
+			b.openedAt = now
+		} else {
+			b.state = StateClosed
+			b.consecutiveFailures = 0
+		}
+		b.halfOpenInFlight = 0
+		b.halfOpenGeneration++ // this window is resolved; any other sibling is now stale too
+		return &StateChangeEvent{Name: b.name, From: from, To: b.state}
+	}
+
+	// Admitted while Closed. If the state has since moved on — another
+	// concurrent call already tripped the breaker — this completion is noise
+	// against a period that is no longer current, and touches nothing.
+	if b.state != StateClosed {
+		return nil
+	}
+	if !failed {
+		b.consecutiveFailures = 0
+		return nil
+	}
+	b.consecutiveFailures++
+	if b.consecutiveFailures < b.failureThreshold {
+		return nil
+	}
+	b.state = StateOpen
+	b.openedAt = now
+	b.consecutiveFailures = 0
+	return &StateChangeEvent{Name: b.name, From: StateClosed, To: StateOpen}
+}
+
+// classify reports whether err should count against the failure threshold.
+// Uses the caller-supplied classifier if one was set via [WithIsFailure];
+// otherwise every non-nil error counts.
 //
-//	func Execute[T any](ctx context.Context, b *Breaker, op func(context.Context) (T, error)) (T, error)
+// TODO(B2): the default classifier, and context-cancellation accounting
+// (FR-05), are blocked on the open question in docs/adr/README.md. This is
+// deliberately just "err != nil" until that lands — not a placeholder that
+// silently does the wrong thing, but the documented, safe default (ADR-0002's
+// v1/v2 split is about the threshold *shape*; this is about what counts at
+// all, and "count every error" is never wrong, only sometimes too eager).
+func (b *Breaker) classify(err error) bool {
+	if b.isFailure != nil {
+		return b.isFailure(err)
+	}
+	return err != nil
+}
+
+// fireStateChange calls Hooks.OnStateChange if one is set (IR-02: nil is a
+// no-op, and this is always called with b.mu released).
+func (b *Breaker) fireStateChange(ctx context.Context, ev *StateChangeEvent) {
+	if ev == nil || b.hooks.OnStateChange == nil {
+		return
+	}
+	b.hooks.OnStateChange(ctx, *ev)
+}
+
+// Execute runs op through b: admitted immediately in [StateClosed], admitted
+// as a bounded probe in [StateHalfOpen], and refused without invoking op in
+// [StateOpen] — returning [ErrOpenState] or [ErrTooManyRequests] (ADR-0001).
 //
-// The name is not settled — Execute against Do against Run — and neither is the
-// signature. Both are the "entry point name and signature" question in
-// docs/adr/README.md, and both get an ADR before this is written, because a
-// library's entry point is the one thing that cannot be renamed after release
-// without breaking every caller.
+// op's own return value and error reach the caller unchanged; Execute wraps,
+// retypes, or annotates neither. A panic in op is recovered, counted as a
+// failure unconditionally, and re-raised with its original value once the
+// breaker's bookkeeping is complete (FR-11, ADR-0003) — b.mu is never held
+// while op runs, so a panicking op cannot leave it locked.
 //
-// The state this needs, deliberately not declared until the transitions that
-// own it are: the consecutive-failure count (FR-02), the instant the circuit
-// opened (FR-01), and the number of probe calls admitted in Half-Open. All of
-// them live under b.mu.
+// Hooks fire synchronously, on the calling goroutine, always after b.mu has
+// been released (FR-09, IR-02): a transition caused by admitting the call,
+// then op runs, then [Hooks.OnCall] or [Hooks.OnReject], then a transition
+// caused by the call's outcome, if any.
 //
-// Two things this must not get wrong, both of them silent:
-//
-//   - Every acquisition of b.mu around caller-supplied code is released by
-//     defer (FR-11). A panic through a held lock does not surface as a panic;
-//     it surfaces as every later call to this dependency blocking forever.
-//   - The Half-Open allowance must be recoverable (FR-12). A probe that never
-//     returns takes the last slot with it, and the circuit then rejects
-//     everything for good while reporting itself as recovering.
+// If op is being invoked as a probe into a dependency that may still be
+// unavailable, it should itself respect ctx's deadline where one is set. A
+// probe that never returns cannot strand the circuit (FR-12, ADR-0004), but a
+// bounded probe recovers on its own without ever admitting a second,
+// overlapping one.
+func Execute[T any](ctx context.Context, b *Breaker, op func(context.Context) (T, error)) (T, error) {
+	var zero T
+
+	adm := b.admit(b.clock.Now())
+	b.fireStateChange(ctx, adm.transition)
+
+	if !adm.admitted {
+		if b.hooks.OnReject != nil {
+			b.hooks.OnReject(ctx, RejectEvent{Name: b.name, State: adm.state, Reason: adm.reject})
+		}
+		return zero, adm.reject
+	}
+
+	result, panicked, recovered, err := callSafely(ctx, op)
+
+	failed := panicked || b.classify(err)
+	completion := b.complete(b.clock.Now(), adm, failed)
+	b.fireStateChange(ctx, completion)
+
+	if b.hooks.OnCall != nil {
+		callErr := err
+		if panicked {
+			// FR-11: the caller gets the original recovered value via panic()
+			// below, unchanged. This is only what the hook sees — CallEvent.Err
+			// is typed error, and a recovered value is not one.
+			callErr = fmt.Errorf("bastion: operation panicked: %v", recovered)
+		}
+		b.hooks.OnCall(ctx, CallEvent{Name: b.name, State: adm.state, Err: callErr, Counted: failed})
+	}
+
+	if panicked {
+		panic(recovered)
+	}
+	return result, err
+}
+
+// callSafely runs op, recovering a panic instead of letting it unwind through
+// the breaker's own bookkeeping. b.mu is never involved here — this is called
+// only after admit has already released it.
+func callSafely[T any](ctx context.Context, op func(context.Context) (T, error)) (result T, panicked bool, recovered any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			recovered = r
+		}
+	}()
+	result, err = op(ctx)
+	return result, false, nil, err
+}

@@ -40,16 +40,18 @@ func (s State) String() string {
 	}
 }
 
-// TODO(B1): the transition table of FR-01, and the counters it reads.
-//
-// The transitions to implement, and the condition that fires each:
+// The transition table of FR-01, implemented in breaker.go's effectiveState,
+// admit and complete rather than here — State itself stays a plain value type
+// with no behaviour of its own:
 //
 //	Closed    -> Open        consecutive failures reach the threshold (FR-02)
 //	Open      -> HalfOpen    the open timeout has elapsed, evaluated lazily on
-//	                         the next call rather than by a timer, so the
-//	                         Breaker owns no goroutine (NFR-05, IR-03)
+//	                         the next call or read rather than by a timer, so
+//	                         the Breaker owns no goroutine (NFR-05, IR-03)
 //	HalfOpen  -> Closed      a probe call succeeds
-//	HalfOpen  -> Open        a probe call fails
+//	HalfOpen  -> Open        a probe call fails, or its window's lease expires
+//	                         without it returning (FR-12, ADR-0004)
 //
-// Every transition notifies Hooks.OnStateChange (FR-09) and every one of them
-// needs a test that has been seen failing (NFR-06).
+// Every transition notifies Hooks.OnStateChange (FR-09) and every one is
+// covered by a transition test in state_test.go, each seen failing against a
+// deliberately broken implementation before being trusted (NFR-06).

@@ -4,11 +4,10 @@
 //
 // # Status
 //
-// Pre-implementation. This package declares its shape and nothing else: the
-// requirements, the decision records and the pipeline that enforces them are
-// the deliverable of the current phase, and the domain code follows the phases
-// in REQUIREMENTS.md. Nothing here is usable yet, and every identifier below
-// may still change.
+// Early development. B1 — the state machine, [Execute], and the hooks that
+// report it — is implemented and tested. Everything past B1 in
+// REQUIREMENTS.md's phase table is not, and every identifier below may still
+// change before v1.
 //
 // # Scope
 //
@@ -23,10 +22,14 @@
 // wrapping at the call site rather than by configuration, so a reader can see
 // which protections are in play without consulting a constructor.
 //
-// The library never logs, prints or panics in normal operation (IR-04). Errors
-// are returned as values, comparable with errors.Is, and everything an operator
-// needs surfaces through the hooks in [Hooks] — called synchronously, so a hook
-// that blocks blocks the request behind it (IR-02).
+// The library never logs, prints, or originates a panic of its own in normal
+// operation (IR-04). Errors are returned as values, comparable with
+// errors.Is, and everything an operator needs surfaces through the hooks in
+// [Hooks] — called synchronously, so a hook that blocks blocks the request
+// behind it (IR-02). [Execute] does re-raise a panic that the wrapped
+// operation itself raised, unchanged, once its own bookkeeping is complete —
+// that is propagation, not origination; see Execute's own doc comment and
+// docs/adr/0003-a-panic-always-counts-as-a-failure-and-is-re-raised.md.
 //
 // There is no global state (IR-03). A Breaker's configuration is fixed once
 // [New] returns, and two breakers in one process share nothing.

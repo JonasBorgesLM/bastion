@@ -7,9 +7,11 @@ depends on it.
 
 **Zero external dependencies** — the standard library only.
 
-> **Status: pre-implementation.** The requirements, the conventions and the
-> pipeline that enforces them are in place. The domain code is not written.
-> Nothing here is importable yet — see [Roadmap](#roadmap).
+> **Status: early development.** The state machine (B1) is implemented and
+> tested — `Execute`, the [`Breaker`](breaker.go) type, `StateClosed` /
+> `StateOpen` / `StateHalfOpen` and their transitions. Classification,
+> retry, timeout, fallback and everything past B1 in the [Roadmap](#roadmap)
+> is not. Breaking changes are still expected before v1.
 
 ---
 
@@ -105,21 +107,25 @@ of that file is that no metrics library is named anywhere in this module.
 
 ## Roadmap
 
-| Phase | Scope |
-| --- | --- |
-| B1 | State machine, with transition tests on a fake clock |
-| B2 | Error classification and context cancellation |
-| B3 | Retry with backoff and jitter; timeout via context |
-| B4 | Named breakers and functional options |
-| B5 | Fallback and observability hooks |
-| B6 | Overhead benchmarks and concurrency tests |
-| B7 | Documentation, runnable examples, first integration in the gateway |
-| B8 | v2: adaptive percentage threshold |
+| Phase | Scope | |
+| --- | --- | --- |
+| B1 | State machine, with transition tests on a fake clock | done |
+| B2 | Error classification and context cancellation | |
+| B3 | Retry with backoff and jitter; timeout via context | |
+| B4 | Named breakers and functional options — validation still open | partial |
+| B5 | Fallback and observability hooks — hooks landed with B1; the fallback needs its own ADR first | partial |
+| B6 | Overhead benchmarks and concurrency tests — a smoke test covers `-race` today; the full suite and the benchmarks are still open | partial |
+| B7 | Documentation, runnable examples, first integration in the gateway | |
+| B8 | v2: adaptive percentage threshold | |
 
-Requirement-by-requirement detail is in [`REQUIREMENTS.md`](REQUIREMENTS.md).
-There is no API documented in this README yet, deliberately: the entry point's
-name and signature are an open question on the record, and documenting an API
-before it exists is how a README starts lying.
+Requirement-by-requirement detail is in [`REQUIREMENTS.md`](REQUIREMENTS.md), and
+the decisions behind B1's shape — the entry point's exact signature, the
+threshold model, panic accounting, stale-probe recovery — are
+[ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
+through
+[ADR-0004](docs/adr/0004-a-stale-half-open-probe-times-out-back-to-open.md).
+A full API section, with install instructions and a quickstart, is B7's job —
+this library still breaks between commits.
 
 ## The ecosystem
 
