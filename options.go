@@ -54,11 +54,11 @@ func WithHalfOpenMaxCalls(n int) Option {
 // dependency, and counting it as a failure opens a circuit on a working
 // service.
 //
-// There is no default yet, and this comment will say what it is once there is
-// one. The default classifier is decided by the open question "how context
-// cancellation is accounted for" in docs/adr/README.md and implemented in B2,
-// because what a nil classifier does and what a cancelled context does are the
-// same decision looked at from two sides.
+// The default, used when no classifier is set, counts every non-nil error as
+// a failure. WithIsFailure is never consulted for a call whose context was
+// Done when the operation returned — that case counts as neither a success
+// nor a failure regardless of what fn would have said, decided before fn is
+// ever reached (FR-05, ADR-0005).
 func WithIsFailure(fn func(error) bool) Option {
 	return func(o *options) { o.isFailure = fn }
 }
