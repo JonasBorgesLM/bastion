@@ -20,6 +20,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0002`](0002-static-failure-threshold-for-v1.md) | A static consecutive-failure threshold for v1; adaptive deferred to v2 | Accepted | — |
 | [`0003`](0003-a-panic-always-counts-as-a-failure-and-is-re-raised.md) | A panic in the operation always counts as a failure, and is re-raised unchanged | Accepted | — |
 | [`0004`](0004-a-stale-half-open-probe-times-out-back-to-open.md) | A stale half-open probe expires back to Open, on the same timeout | Accepted | — |
+| [`0005`](0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md) | Context cancellation is detected by reading the outer ctx, not by matching the returned error | Accepted | — |
 
 ## Open questions
 
@@ -33,17 +34,18 @@ numbers. The numbers in the first column are for conversation, not for citation.
 
 | # | Question | Needed by |
 | --- | --- | --- |
-| 1 | How context cancellation is accounted for: neither a false failure that opens a circuit on a healthy dependency, nor a false success that hides a slow one (FR-05) | B2 |
-| 2 | Retry inside the breaker or composed around it, and which order the library recommends. The current position is that they stay decoupled, and the reasoning has to be written down before the code assumes it (FR-06) | B3 |
-| 3 | How the fallback of FR-08 is supplied. It is typed by the call's return value, and a method cannot introduce a type parameter its receiver lacks — see the note at the end of [`options.go`](../../options.go) | B5 |
-| 4 | Whether the per-operation timeout of FR-07 needs library code at all, given that it is `context.WithTimeout` | B3 |
-| 5 | Where bastion plugs in first. The gateway is the natural candidate — a reverse proxy without resilience is a single point of failure for everything behind it — and the decision belongs on the record rather than in a conversation. The record also fixes the two host-side rules of [`REQUIREMENTS.md`](../../REQUIREMENTS.md) §5.1: `ErrOpenState` maps to `503` with `Retry-After`, and a rejected outbound call does not re-charge the client's `moat` rate-limit budget | B7 |
+| 1 | Retry inside the breaker or composed around it, and which order the library recommends. The current position is that they stay decoupled, and the reasoning has to be written down before the code assumes it (FR-06) | B3 |
+| 2 | How the fallback of FR-08 is supplied. It is typed by the call's return value, and a method cannot introduce a type parameter its receiver lacks — see the note at the end of [`options.go`](../../options.go) | B5 |
+| 3 | Whether the per-operation timeout of FR-07 needs library code at all, given that it is `context.WithTimeout` | B3 |
+| 4 | Where bastion plugs in first. The gateway is the natural candidate — a reverse proxy without resilience is a single point of failure for everything behind it — and the decision belongs on the record rather than in a conversation. The record also fixes the two host-side rules of [`REQUIREMENTS.md`](../../REQUIREMENTS.md) §5.1: `ErrOpenState` maps to `503` with `Retry-After`, and a rejected outbound call does not re-charge the client's `moat` rate-limit budget | B7 |
 
-Four questions that blocked B1 — the entry point's name and signature, the
+Five questions are resolved and removed from this table; see the Index above.
+Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
-recovery — are resolved as [ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)
-through [ADR-0004](0004-a-stale-half-open-probe-times-out-back-to-open.md) and
-have been removed from this table; see the Index above.
+recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)
+through [ADR-0004](0004-a-stale-half-open-probe-times-out-back-to-open.md)).
+One blocked B2 — how context cancellation is accounted for
+([ADR-0005](0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md)).
 
 ## Reopening criteria on the record
 
