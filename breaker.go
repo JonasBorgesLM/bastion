@@ -208,10 +208,26 @@ func (b *Breaker) admit(now time.Time) admission {
 	}
 }
 
+// outcome classifies a completed call for the breaker's own bookkeeping. It
+// never affects what Execute returns to the caller — op's own value and
+// error reach the caller unchanged on every outcome (ADR-0001) — it only
+// decides what complete does with the counters.
+type outcome int
+
+const (
+	outcomeSuccess outcome = iota
+	outcomeFailure
+	// outcomeCancelled reports that ctx (the exact context passed into
+	// Execute) was Done when op returned. It moves neither counter (FR-05,
+	// ADR-0005): not the failure count, and not a reset of it either — a
+	// cancelled call is not evidence the dependency is healthy.
+	outcomeCancelled
+)
+
 // complete records the outcome of a call admit previously admitted, mutating
 // and persisting any transition it causes. Call with adm.admitted true; adm
 // and now come from admit and clock.Now() respectively, at the call site.
-func (b *Breaker) complete(now time.Time, adm admission, failed bool) *StateChangeEvent {
+func (b *Breaker) complete(now time.Time, adm admission, oc outcome) *StateChangeEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -229,8 +245,18 @@ func (b *Breaker) complete(now time.Time, adm admission, failed bool) *StateChan
 			return nil
 		}
 		b.halfOpenInFlight--
+		if oc == outcomeCancelled {
+			// ADR-0005: the slot is freed so a later call can still be
+			// admitted as a probe, but the window's own verdict stays
+			// undecided — this probe never actually told the breaker
+			// anything about the dependency. Generation is deliberately not
+			// bumped: a sibling probe (WithHalfOpenMaxCalls > 1) can still
+			// resolve this same window normally, and if none ever does,
+			// ADR-0004's staleness lease is what eventually reopens it.
+			return nil
+		}
 		from := b.state
-		if failed {
+		if oc == outcomeFailure {
 			b.state = StateOpen
 			b.openedAt = now
 		} else {
@@ -248,30 +274,29 @@ func (b *Breaker) complete(now time.Time, adm admission, failed bool) *StateChan
 	if b.state != StateClosed {
 		return nil
 	}
-	if !failed {
+	switch oc {
+	case outcomeCancelled:
+		return nil
+	case outcomeSuccess:
 		b.consecutiveFailures = 0
 		return nil
+	default: // outcomeFailure
+		b.consecutiveFailures++
+		if b.consecutiveFailures < b.failureThreshold {
+			return nil
+		}
+		b.state = StateOpen
+		b.openedAt = now
+		b.consecutiveFailures = 0
+		return &StateChangeEvent{Name: b.name, From: StateClosed, To: StateOpen}
 	}
-	b.consecutiveFailures++
-	if b.consecutiveFailures < b.failureThreshold {
-		return nil
-	}
-	b.state = StateOpen
-	b.openedAt = now
-	b.consecutiveFailures = 0
-	return &StateChangeEvent{Name: b.name, From: StateClosed, To: StateOpen}
 }
 
 // classify reports whether err should count against the failure threshold.
 // Uses the caller-supplied classifier if one was set via [WithIsFailure];
-// otherwise every non-nil error counts.
-//
-// TODO(B2): the default classifier, and context-cancellation accounting
-// (FR-05), are blocked on the open question in docs/adr/README.md. This is
-// deliberately just "err != nil" until that lands — not a placeholder that
-// silently does the wrong thing, but the documented, safe default (ADR-0002's
-// v1/v2 split is about the threshold *shape*; this is about what counts at
-// all, and "count every error" is never wrong, only sometimes too eager).
+// otherwise every non-nil error counts. classify is not consulted at all when
+// the call's context was cancelled (ADR-0005) — that path is decided in
+// Execute before classify is ever reached.
 func (b *Breaker) classify(err error) bool {
 	if b.isFailure != nil {
 		return b.isFailure(err)
@@ -298,6 +323,16 @@ func (b *Breaker) fireStateChange(ctx context.Context, ev *StateChangeEvent) {
 // breaker's bookkeeping is complete (FR-11, ADR-0003) — b.mu is never held
 // while op runs, so a panicking op cannot leave it locked.
 //
+// If ctx is Done when op returns, the call counts as neither a success nor a
+// failure (FR-05, ADR-0005): the failure count is untouched — not reset
+// either, since a cancelled call is not evidence the dependency is healthy —
+// and a Half-Open probe's window stays undecided rather than resolved. This
+// is decided by reading ctx.Err() on the exact context value passed to
+// Execute, never by matching op's returned error: an operation whose own
+// internally-derived context times out on its own can return
+// context.DeadlineExceeded too, and that is an ordinary failure, not caller
+// cancellation.
+//
 // Hooks fire synchronously, on the calling goroutine, always after b.mu has
 // been released (FR-09, IR-02): a transition caused by admitting the call,
 // then op runs, then [Hooks.OnCall] or [Hooks.OnReject], then a transition
@@ -323,8 +358,24 @@ func Execute[T any](ctx context.Context, b *Breaker, op func(context.Context) (T
 
 	result, panicked, recovered, err := callSafely(ctx, op)
 
-	failed := panicked || b.classify(err)
-	completion := b.complete(b.clock.Now(), adm, failed)
+	var oc outcome
+	switch {
+	case panicked:
+		// ADR-0003: unconditional, even if ctx also happens to be Done — a
+		// panic is never evidence that the caller gave up.
+		oc = outcomeFailure
+	case ctx.Err() != nil:
+		// ADR-0005: read on ctx itself, the exact value passed into Execute —
+		// never on err, which cannot tell caller cancellation apart from an
+		// operation's own internally-derived context timing out.
+		oc = outcomeCancelled
+	case b.classify(err):
+		oc = outcomeFailure
+	default:
+		oc = outcomeSuccess
+	}
+
+	completion := b.complete(b.clock.Now(), adm, oc)
 	b.fireStateChange(ctx, completion)
 
 	if b.hooks.OnCall != nil {
@@ -335,7 +386,7 @@ func Execute[T any](ctx context.Context, b *Breaker, op func(context.Context) (T
 			// is typed error, and a recovered value is not one.
 			callErr = fmt.Errorf("bastion: operation panicked: %v", recovered)
 		}
-		b.hooks.OnCall(ctx, CallEvent{Name: b.name, State: adm.state, Err: callErr, Counted: failed})
+		b.hooks.OnCall(ctx, CallEvent{Name: b.name, State: adm.state, Err: callErr, Counted: oc == outcomeFailure})
 	}
 
 	if panicked {

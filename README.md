@@ -7,10 +7,11 @@ depends on it.
 
 **Zero external dependencies** — the standard library only.
 
-> **Status: early development.** The state machine (B1) is implemented and
-> tested — `Execute`, the [`Breaker`](breaker.go) type, `StateClosed` /
-> `StateOpen` / `StateHalfOpen` and their transitions. Classification,
-> retry, timeout, fallback and everything past B1 in the [Roadmap](#roadmap)
+> **Status: early development.** The state machine (B1) and error
+> classification (B2) are implemented and tested — `Execute`, the
+> [`Breaker`](breaker.go) type, `StateClosed` / `StateOpen` / `StateHalfOpen`
+> and their transitions, `WithIsFailure`, and context-cancellation accounting.
+> Retry, timeout, fallback and everything past B2 in the [Roadmap](#roadmap)
 > is not. Breaking changes are still expected before v1.
 
 ---
@@ -110,7 +111,7 @@ of that file is that no metrics library is named anywhere in this module.
 | Phase | Scope | |
 | --- | --- | --- |
 | B1 | State machine, with transition tests on a fake clock | done |
-| B2 | Error classification and context cancellation | |
+| B2 | Error classification and context cancellation | done |
 | B3 | Retry with backoff and jitter; timeout via context | |
 | B4 | Named breakers and functional options — validation still open | partial |
 | B5 | Fallback and observability hooks — hooks landed with B1; the fallback needs its own ADR first | partial |
@@ -119,11 +120,11 @@ of that file is that no metrics library is named anywhere in this module.
 | B8 | v2: adaptive percentage threshold | |
 
 Requirement-by-requirement detail is in [`REQUIREMENTS.md`](REQUIREMENTS.md), and
-the decisions behind B1's shape — the entry point's exact signature, the
-threshold model, panic accounting, stale-probe recovery — are
-[ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
+the decisions behind B1 and B2's shape — the entry point's exact signature, the
+threshold model, panic accounting, stale-probe recovery, context cancellation —
+are [ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
 through
-[ADR-0004](docs/adr/0004-a-stale-half-open-probe-times-out-back-to-open.md).
+[ADR-0005](docs/adr/0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md).
 A full API section, with install instructions and a quickstart, is B7's job —
 this library still breaks between commits.
 

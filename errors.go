@@ -25,11 +25,9 @@ var (
 	ErrInvalidConfig = errors.New("bastion: invalid configuration")
 )
 
-// TODO(B2): the accounting of context cancellation (FR-05).
-//
-// A cancelled context is neither a success nor a failure of the remote service:
-// counting it as a failure lets a client-side deadline open a circuit that
-// nothing is wrong behind, and counting it as a success hides a dependency that
-// is genuinely slow. The open question is on the record as "how context
-// cancellation is accounted for" in docs/adr/README.md, and is decided before
-// this is implemented.
+// A cancelled context is accounted for as neither a success nor a failure
+// (FR-05, ADR-0005) in [Execute], not by an error here: there is no sentinel
+// for it, because op's own error — including op's own context.Canceled or
+// context.DeadlineExceeded, if it returns one — always reaches the caller
+// exactly as op returned it. Cancellation changes only what the breaker does
+// with the outcome internally.

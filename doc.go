@@ -4,10 +4,11 @@
 //
 // # Status
 //
-// Early development. B1 — the state machine, [Execute], and the hooks that
-// report it — is implemented and tested. Everything past B1 in
-// REQUIREMENTS.md's phase table is not, and every identifier below may still
-// change before v1.
+// Early development. B1 and B2 — the state machine, [Execute], the hooks
+// that report it, error classification via [WithIsFailure], and
+// context-cancellation accounting — are implemented and tested. Everything
+// past B2 in REQUIREMENTS.md's phase table is not, and every identifier
+// below may still change before v1.
 //
 // # Scope
 //

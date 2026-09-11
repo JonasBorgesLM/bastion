@@ -87,9 +87,147 @@ func TestNew_BreakersAreIndependent(t *testing.T) {
 // TODO(B4): New must reject a non-positive threshold, open timeout and
 // half-open allowance. Each rejection gets a case here, and each is written
 // against a New that does not yet check — seen red, then made green.
+
+// ADR-0005: a cancelled context moves neither counter. FailureThreshold(1)
+// means a single counted failure would open the circuit -- it stays Closed,
+// proving the cancelled call was excluded rather than merely outnumbered.
+func TestExecute_CancelledContextDoesNotCountAsAFailure(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(1), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = bastion.Execute(ctx, b, failingOp)
+
+	if got := b.State(); got != bastion.StateClosed {
+		t.Fatalf("State() after a cancelled call returning an error = %v, want %v", got, bastion.StateClosed)
+	}
+}
+
+// ADR-0005: a cancelled context does not reset the consecutive-failure count
+// either -- it is excluded from accounting entirely, not treated as a
+// success. FailureThreshold(2): one real failure, then a cancelled call
+// (returning success, to isolate the reset question specifically), then a
+// second real failure. If the cancelled call had wrongly reset the count,
+// this second failure would only bring it to 1 and the circuit would stay
+// Closed; correctly excluded, the count is still 1 going in and this failure
+// reaches 2, opening it.
 //
-// TODO(B2): a cancelled context accounted for as neither success nor failure
-// (FR-05) is blocked on the classification ADR and belongs here once it lands.
+// Negative control: verified failing (State() == Closed) against a version
+// that folded the cancelled outcome into the same branch as success.
+func TestExecute_CancelledContextDoesNotResetTheFailureCount(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(2), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp) // 1 real failure
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = bastion.Execute(ctx, b, succeedingOp) // cancelled; must not reset
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp) // 2nd real failure
+
+	if got := b.State(); got != bastion.StateOpen {
+		t.Fatalf("State() after 2 real failures around a cancelled call = %v, want %v", got, bastion.StateOpen)
+	}
+}
+
+// ADR-0005's actual distinguishing claim: an operation's OWN internally
+// derived context timing out is not the same event as the caller's context
+// (the one passed into Execute) being cancelled, even though both can
+// produce context.DeadlineExceeded. Here the outer ctx is context.Background
+// -- never cancelled -- so this must count as an ordinary failure.
+//
+// Negative control: verified failing (State() == Closed) against a version
+// matching on errors.Is(err, context.DeadlineExceeded) / context.Canceled
+// instead of reading ctx.Err() on the outer context -- exactly the
+// alternative ADR-0005 rejects.
+func TestExecute_OperationsOwnDeadlineExceededCountsAsAnOrdinaryFailure(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(1), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+		// Simulates an operation whose own internally-derived context (its
+		// own shorter WithTimeout) expired -- unrelated to the outer ctx,
+		// which the caller never touched.
+		return 0, context.DeadlineExceeded
+	})
+
+	if got := b.State(); got != bastion.StateOpen {
+		t.Fatalf("State() after the operation's own DeadlineExceeded (outer ctx untouched) = %v, want %v", got, bastion.StateOpen)
+	}
+}
+
+// FR-09: OnCall reports Counted=false for a cancelled call, matching hooks.go's
+// own doc comment on CallEvent.
+func TestExecute_OnCallReportsCountedFalseForACancelledContext(t *testing.T) {
+	clock := newFakeClock()
+	var calls []bastion.CallEvent
+	b, err := bastion.New("dep",
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnCall: func(_ context.Context, ev bastion.CallEvent) { calls = append(calls, ev) },
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = bastion.Execute(ctx, b, failingOp)
+
+	if len(calls) != 1 {
+		t.Fatalf("got %d OnCall events, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].Counted {
+		t.Fatalf("call event = %+v, want Counted=false for a cancelled context", calls[0])
+	}
+}
+
+// ADR-0005's Consequences: a cancelled Half-Open probe frees its slot without
+// resolving the window -- the generation is not bumped, so a later call is
+// still admitted as a probe under the same window rather than being rejected
+// with ErrTooManyRequests, and can still close the circuit normally.
+func TestExecute_CancelledHalfOpenProbeFreesItsSlotWithoutResolvingTheWindow(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithHalfOpenMaxCalls(1),
+		bastion.WithClock(clock),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	clock.Advance(10 * time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = bastion.Execute(ctx, b, failingOp) // admitted as the probe, then cancelled
+	if got := b.State(); got != bastion.StateHalfOpen {
+		t.Fatalf("State() after the cancelled probe = %v, want %v (window still undecided)", got, bastion.StateHalfOpen)
+	}
+
+	// A fresh, non-cancelled call must be admitted as a probe (slot freed,
+	// same window), not rejected -- and it resolves the window normally.
+	if _, err := bastion.Execute(context.Background(), b, succeedingOp); err != nil {
+		t.Fatalf("probe after the cancelled one: error = %v, want nil (admitted, not ErrTooManyRequests)", err)
+	}
+	if got := b.State(); got != bastion.StateClosed {
+		t.Fatalf("State() after the window's real probe succeeded = %v, want %v", got, bastion.StateClosed)
+	}
+}
 
 // ADR-0001: Execute is a free generic function. A rejected call must never
 // invoke the operation -- ErrOpenState and ErrTooManyRequests both mean the
