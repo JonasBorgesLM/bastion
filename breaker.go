@@ -80,11 +80,9 @@ func New(name string, opts ...Option) (*Breaker, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
-
-	// TODO(B4): validate the accumulated options — a non-positive threshold, a
-	// non-positive open timeout, a non-positive half-open allowance. Each
-	// rejection needs a test, and a test for a rejection is only verified once
-	// it has been seen failing against a New that does not check.
+	if err := o.validate(); err != nil {
+		return nil, err
+	}
 
 	return &Breaker{
 		name:             name,

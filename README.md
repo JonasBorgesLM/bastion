@@ -8,13 +8,14 @@ depends on it.
 **Zero external dependencies** — the standard library only.
 
 > **Status: early development.** The state machine (B1), error classification
-> (B2) and retry with backoff and jitter (B3) are implemented and tested —
-> `Execute`, the [`Breaker`](breaker.go) type, `StateClosed` / `StateOpen` /
-> `StateHalfOpen` and their transitions, `WithIsFailure`,
-> context-cancellation accounting, and [`Retry`](retry.go) with
-> [`RetryPolicy`](retry.go). Timeout needs no code of its own (see the
-> Roadmap). Fallback and everything past B3 in the [Roadmap](#roadmap) is
-> not. Breaking changes are still expected before v1.
+> (B2), retry with backoff and jitter (B3), and option validation (B4) are
+> implemented and tested — `Execute`, the [`Breaker`](breaker.go) type,
+> `StateClosed` / `StateOpen` / `StateHalfOpen` and their transitions,
+> `WithIsFailure`, context-cancellation accounting, [`Retry`](retry.go) with
+> [`RetryPolicy`](retry.go), and every `With*` option rejecting a
+> configuration `New` will not build a breaker from. Timeout needs no code of
+> its own (see the Roadmap). Fallback and everything past B4 in the
+> [Roadmap](#roadmap) is not. Breaking changes are still expected before v1.
 
 ---
 
@@ -115,7 +116,7 @@ of that file is that no metrics library is named anywhere in this module.
 | B1 | State machine, with transition tests on a fake clock | done |
 | B2 | Error classification and context cancellation | done |
 | B3 | Retry with backoff and jitter; timeout via context | done |
-| B4 | Named breakers and functional options — validation still open | partial |
+| B4 | Named breakers and functional options | done |
 | B5 | Fallback and observability hooks — hooks landed with B1; the fallback needs its own ADR first | partial |
 | B6 | Overhead benchmarks and concurrency tests — a smoke test covers `-race` today; the full suite and the benchmarks are still open | partial |
 | B7 | Documentation, runnable examples, first integration in the gateway | |

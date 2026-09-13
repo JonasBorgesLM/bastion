@@ -20,13 +20,13 @@ id (`FR-01`, `NFR-05`, `IR-02`…). Decisions live in
 
 ## Current phase
 
-**B1 through B3 done** — the state machine, `Execute`, observability hooks
+**B1 through B4 done** — the state machine, `Execute`, observability hooks
 (pulled forward from B5; see the note at the end of [`hooks.go`](hooks.go)),
-error classification (FR-04), context-cancellation accounting (FR-05), and
-retry with backoff and jitter (FR-06) are implemented and tested at 100%
-coverage. B4 onward are not. Work is grouped B1 through B8 in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each `TODO(Bn)` in the source
-names the phase that closes it.
+error classification (FR-04), context-cancellation accounting (FR-05), retry
+with backoff and jitter (FR-06), and option validation (IR-04) are
+implemented and tested at 100% coverage. B5 onward are not. Work is grouped
+B1 through B8 in [`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each
+`TODO(Bn)` in the source names the phase that closes it.
 
 Do not implement a phase whose open question is still open. Two questions
 remain in [`docs/adr/README.md`](docs/adr/README.md), blocking B5 and B7;
