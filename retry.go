@@ -1,6 +1,11 @@
 package bastion
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"math/rand"
+	"time"
+)
 
 // RetryPolicy describes how a failed call is retried: how many attempts, how
 // long to wait between them, and how much of that wait is randomised (FR-06).
@@ -25,36 +30,161 @@ type RetryPolicy struct {
 	// that hangs for minutes.
 	MaxDelay time.Duration
 
-	// Jitter is the fraction of each delay that is randomised, in [0, 1].
-	// Zero means none — and none is the setting that synchronises every
-	// client of a recovering service into one thundering herd, which is the
-	// failure retry was supposed to prevent.
+	// Jitter is the fraction of each delay that is randomised away, in
+	// [0, 1]. A computed delay of d is reduced by a random amount in
+	// [0, d*Jitter], so the actual wait falls in [d*(1-Jitter), d]. Zero
+	// means none — and none is the setting that synchronises every client of
+	// a recovering service into one thundering herd, which is the failure
+	// retry was supposed to prevent.
 	Jitter float64
 }
 
-// TODO(B3): the retry loop of FR-06, and the timeout of FR-07.
+// validate reports whether p describes anything [Retry] can act on. Checked
+// once, up front, so a misconfigured policy fails before the first attempt
+// rather than producing a confusing delay or a silently-constant wait.
+func (p RetryPolicy) validate() error {
+	switch {
+	case p.MaxAttempts < 0:
+		return fmt.Errorf("%w: RetryPolicy.MaxAttempts must not be negative, got %d", ErrInvalidConfig, p.MaxAttempts)
+	case p.BaseDelay < 0:
+		return fmt.Errorf("%w: RetryPolicy.BaseDelay must not be negative, got %s", ErrInvalidConfig, p.BaseDelay)
+	case p.MaxDelay < 0:
+		return fmt.Errorf("%w: RetryPolicy.MaxDelay must not be negative, got %s", ErrInvalidConfig, p.MaxDelay)
+	case p.MaxDelay > 0 && p.MaxDelay < p.BaseDelay:
+		return fmt.Errorf("%w: RetryPolicy.MaxDelay (%s) must be zero or at least BaseDelay (%s)", ErrInvalidConfig, p.MaxDelay, p.BaseDelay)
+	case p.Jitter < 0 || p.Jitter > 1:
+		return fmt.Errorf("%w: RetryPolicy.Jitter must be in [0, 1], got %v", ErrInvalidConfig, p.Jitter)
+	}
+	return nil
+}
+
+// overflowGuard is a duration comfortably below where doubling it again would
+// wrap a time.Duration (an int64 count of nanoseconds). It exists only to stop
+// nextDelay's loop from ever computing a negative or wrapped-around duration
+// on a policy with an unreasonably long attempt chain; ordinary policies
+// (delays measured in milliseconds to minutes, attempts in the single or low
+// double digits) never come close to it.
+const overflowGuard = time.Duration(1) << 61
+
+// nextDelay computes the wait before the given attempt (the attempt about to
+// be made; attempt 2 is the first retry, matching BaseDelay's own godoc: "the
+// wait before the second attempt"). It is a pure function of p and attempt,
+// except for the jitter draw, which uses math/rand, not crypto/rand — a
+// scheduling decision, not a secret, so no CSPRNG cost is spent on a hot
+// retry path. gosec's G404 flags any math/rand use on principle; it is
+// suppressed at the call site with the reasoning above, not silenced
+// globally.
 //
-// Retry composes with a [Breaker] and never requires one. The order matters and
-// belongs in an ADR — the "retry inside the breaker or composed around it"
-// question in docs/adr/README.md. Retry *outside* the breaker means a retried
-// burst can open the circuit, retry *inside* means the breaker sees one call
-// where several were made. The library takes no position by coupling them
-// — it takes one by documenting which composition it recommends and why.
+// Doubling is done iteratively with a clamp at every step, rather than by
+// shifting attempt-2 bits at once, so a policy with a very large MaxAttempts
+// can never compute an overflowed or negative duration: as soon as the
+// running value would cross MaxDelay (or overflowGuard, absent a MaxDelay),
+// growth stops.
+func nextDelay(p RetryPolicy, attempt int) time.Duration {
+	shift := max(attempt-2, 0)
+
+	d := p.BaseDelay
+	for range shift {
+		if p.MaxDelay > 0 && d >= p.MaxDelay {
+			d = p.MaxDelay
+			break
+		}
+		if d > overflowGuard {
+			if p.MaxDelay > 0 {
+				d = p.MaxDelay
+			} else {
+				d = overflowGuard
+			}
+			break
+		}
+		d *= 2
+	}
+	if p.MaxDelay > 0 && d > p.MaxDelay {
+		d = p.MaxDelay
+	}
+
+	if p.Jitter > 0 && d > 0 {
+		d -= time.Duration(float64(d) * p.Jitter * rand.Float64()) // #nosec G404 -- scheduling jitter, not a secret; see the Jitter field's own doc.
+	}
+	return d
+}
+
+// sleepRespectingContext waits for d or until ctx is done, whichever comes
+// first. A zero or negative d still checks ctx once rather than skipping the
+// wait unconditionally: a context already done when a retry attempt finishes
+// must stop the loop even when there is nothing left to wait out.
+func sleepRespectingContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Retry calls op, retrying on error per p, and returns the first success or
+// the last attempt's error once p.MaxAttempts is reached (FR-06).
 //
-// The shape under consideration:
+// Retry has no notion of a [Breaker] and touches none of a Breaker's counters
+// — it composes with one entirely by nesting at the call site, and the
+// library's own recommendation (docs/adr/0006-retry-composes-around-the-breaker-not-inside-it.md)
+// is to nest [Execute] *inside* the retried operation, so each attempt is
+// independently admitted and counted:
 //
-//	func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (T, error)) (T, error)
+//	result, err := bastion.Retry(ctx, policy, func(ctx context.Context) (T, error) {
+//		return bastion.Execute(ctx, breaker, realOp)
+//	})
 //
-// Two things this must get right, both of which have tests before code:
+// See that ADR for why, and for the real cost of the choice: a
+// FailureThreshold set low relative to MaxAttempts can open the circuit
+// before one logical call's own retry budget is exhausted, on purpose — the
+// threshold counts real attempts against the dependency, not logical calls.
 //
-//   - The delay is waited out against ctx, never with time.Sleep. A cancelled
-//     context must abandon the wait immediately rather than at the end of it,
-//     and it must not be counted as a failure (FR-05).
-//   - Jitter is drawn from math/rand, not crypto/rand. It is a scheduling
-//     decision, not a secret, and a CSPRNG in a hot retry path is cost without
-//     a threat to spend it on.
+// The wait between attempts is a timer raced against ctx, never time.Sleep: a
+// context cancelled mid-wait makes Retry return at once, with ctx's own
+// error — not the previous attempt's — since the caller stopped waiting on
+// this altogether rather than merely watching one more attempt fail (FR-05's
+// spirit, applied here independently of any breaker).
 //
-// FR-07 also lands here, and it may not need code at all: a per-operation
-// timeout is context.WithTimeout, and a helper wrapping two lines of standard
-// library earns its place only if it removes a mistake callers actually make.
-// Decide that before writing it.
+// Retry does not inspect or special-case ctx before the very first attempt;
+// op receives it unchanged, exactly as [Execute] does, and is free to derive
+// its own child context per attempt
+// (docs/adr/0007-no-dedicated-timeout-helper.md) if a per-attempt timeout is
+// wanted.
+//
+// Retry returns [ErrInvalidConfig] without invoking op at all if p does not
+// describe a policy it can act on.
+func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (T, error)) (T, error) {
+	var zero T
+	if err := p.validate(); err != nil {
+		return zero, err
+	}
+
+	maxAttempts := max(p.MaxAttempts, 1)
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result, err := op(ctx)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if attempt == maxAttempts {
+			break
+		}
+		if werr := sleepRespectingContext(ctx, nextDelay(p, attempt+1)); werr != nil {
+			return zero, werr
+		}
+	}
+	return zero, lastErr
+}

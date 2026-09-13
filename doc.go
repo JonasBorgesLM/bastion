@@ -4,16 +4,19 @@
 //
 // # Status
 //
-// Early development. B1 and B2 — the state machine, [Execute], the hooks
-// that report it, error classification via [WithIsFailure], and
-// context-cancellation accounting — are implemented and tested. Everything
-// past B2 in REQUIREMENTS.md's phase table is not, and every identifier
-// below may still change before v1.
+// Early development. B1 through B3 — the state machine, [Execute], the
+// hooks that report it, error classification via [WithIsFailure],
+// context-cancellation accounting, and [Retry] with [RetryPolicy] — are
+// implemented and tested. Everything past B3 in REQUIREMENTS.md's phase
+// table is not, and every identifier below may still change before v1.
 //
 // # Scope
 //
 // This package owns the circuit state machine, the classification of an error
-// as a failure, retry scheduling and the timeout wrapper. It does not own
+// as a failure, and retry scheduling. A per-operation timeout is
+// context.WithTimeout, used directly at the call site rather than through a
+// bastion wrapper — there is no timeout type or function here on purpose
+// (docs/adr/0007-no-dedicated-timeout-helper.md). This package does not own
 // transport, routing, metric export or log shipping, and it does not import
 // net/http (IR-01): what it protects is a call, whatever carries it.
 //
