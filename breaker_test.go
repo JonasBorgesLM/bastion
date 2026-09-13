@@ -84,9 +84,48 @@ func TestNew_BreakersAreIndependent(t *testing.T) {
 	}
 }
 
-// TODO(B4): New must reject a non-positive threshold, open timeout and
-// half-open allowance. Each rejection gets a case here, and each is written
-// against a New that does not yet check — seen red, then made green.
+// IR-04: New returns ErrInvalidConfig rather than building a Breaker that
+// would misbehave -- or, for a nil Clock, panic -- at the first call.
+func TestNew_RejectsInvalidOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []bastion.Option
+	}{
+		{"zero FailureThreshold", []bastion.Option{bastion.WithFailureThreshold(0)}},
+		{"negative FailureThreshold", []bastion.Option{bastion.WithFailureThreshold(-1)}},
+		{"zero OpenTimeout", []bastion.Option{bastion.WithOpenTimeout(0)}},
+		{"negative OpenTimeout", []bastion.Option{bastion.WithOpenTimeout(-time.Second)}},
+		{"zero HalfOpenMaxCalls", []bastion.Option{bastion.WithHalfOpenMaxCalls(0)}},
+		{"negative HalfOpenMaxCalls", []bastion.Option{bastion.WithHalfOpenMaxCalls(-1)}},
+		{"nil Clock", []bastion.Option{bastion.WithClock(nil)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := bastion.New("dep", tt.opts...)
+			if !errors.Is(err, bastion.ErrInvalidConfig) {
+				t.Fatalf("New() error = %v, want a match for ErrInvalidConfig", err)
+			}
+			if b != nil {
+				t.Fatalf("New() returned a breaker alongside an error: %#v", b)
+			}
+		})
+	}
+}
+
+// The boundary itself: exactly 1 is valid for all three integer options,
+// distinguishing "must be positive" from "must be at least 2 or more".
+func TestNew_AcceptsTheMinimumPositiveValues(t *testing.T) {
+	clock := newFakeClock()
+	_, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(time.Nanosecond),
+		bastion.WithHalfOpenMaxCalls(1),
+		bastion.WithClock(clock),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+}
 
 // ADR-0005: a cancelled context moves neither counter. FailureThreshold(1)
 // means a single counted failure would open the circuit -- it stays Closed,

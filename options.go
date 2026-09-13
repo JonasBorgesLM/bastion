@@ -1,6 +1,9 @@
 package bastion
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Provisional defaults. TODO(B4): each of these is a number nobody has
 // justified yet. They are written down here rather than scattered through New
@@ -24,6 +27,24 @@ type options struct {
 	hooks            Hooks
 }
 
+// validate reports whether o describes anything [New] can build a [Breaker]
+// from. Checked once, before construction, so a misconfigured breaker fails
+// visibly there rather than misbehaving — or, for a nil Clock, panicking on
+// its first call — later and less obviously (IR-04).
+func (o options) validate() error {
+	switch {
+	case o.failureThreshold <= 0:
+		return fmt.Errorf("%w: WithFailureThreshold must be positive, got %d", ErrInvalidConfig, o.failureThreshold)
+	case o.openTimeout <= 0:
+		return fmt.Errorf("%w: WithOpenTimeout must be positive, got %s", ErrInvalidConfig, o.openTimeout)
+	case o.halfOpenMaxCalls <= 0:
+		return fmt.Errorf("%w: WithHalfOpenMaxCalls must be positive, got %d", ErrInvalidConfig, o.halfOpenMaxCalls)
+	case o.clock == nil:
+		return fmt.Errorf("%w: WithClock must not be given a nil Clock", ErrInvalidConfig)
+	}
+	return nil
+}
+
 // Option configures a [Breaker] at construction. See [New].
 type Option func(*options)
 
@@ -37,13 +58,14 @@ func WithFailureThreshold(n int) Option {
 // WithOpenTimeout sets how long the circuit stays in [StateOpen] before a probe
 // call is admitted (FR-01). The elapsed time is evaluated on the next call, so
 // nothing happens at the instant the timeout expires and no goroutine is
-// waiting for it.
+// waiting for it. Must be positive; [New] returns [ErrInvalidConfig] otherwise.
 func WithOpenTimeout(d time.Duration) Option {
 	return func(o *options) { o.openTimeout = d }
 }
 
 // WithHalfOpenMaxCalls bounds how many probe calls [StateHalfOpen] admits
-// before further calls are rejected with [ErrTooManyRequests] (FR-01).
+// before further calls are rejected with [ErrTooManyRequests] (FR-01). Must be
+// positive; [New] returns [ErrInvalidConfig] otherwise.
 func WithHalfOpenMaxCalls(n int) Option {
 	return func(o *options) { o.halfOpenMaxCalls = n }
 }
@@ -65,7 +87,9 @@ func WithIsFailure(fn func(error) bool) Option {
 
 // WithClock substitutes the [Clock] the breaker reads (NFR-05). The default is
 // [SystemClock]. Tests pass a fake so that a transition is caused by advancing
-// time rather than by waiting for it.
+// time rather than by waiting for it. c must not be nil; [New] returns
+// [ErrInvalidConfig] rather than building a breaker that would panic on its
+// first call.
 func WithClock(c Clock) Option {
 	return func(o *options) { o.clock = c }
 }

@@ -4,10 +4,11 @@
 //
 // # Status
 //
-// Early development. B1 through B3 — the state machine, [Execute], the
+// Early development. B1 through B4 — the state machine, [Execute], the
 // hooks that report it, error classification via [WithIsFailure],
-// context-cancellation accounting, and [Retry] with [RetryPolicy] — are
-// implemented and tested. Everything past B3 in REQUIREMENTS.md's phase
+// context-cancellation accounting, [Retry] with [RetryPolicy], and every
+// [Option] rejecting a configuration [New] will not build a breaker from —
+// are implemented and tested. Everything past B4 in REQUIREMENTS.md's phase
 // table is not, and every identifier below may still change before v1.
 //
 // # Scope
