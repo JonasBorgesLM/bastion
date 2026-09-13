@@ -18,10 +18,11 @@ var (
 	// operation was never invoked.
 	ErrTooManyRequests = errors.New("bastion: too many requests in half-open state")
 
-	// ErrInvalidConfig reports that New was given a configuration it will not
-	// build a Breaker from. Returned rather than panicked: a library that
-	// panics on configuration takes down a host at startup for something the
-	// host could have handled (IR-04).
+	// ErrInvalidConfig reports that a configuration value this library was
+	// given does not describe anything it can act on: [New]'s options, or a
+	// [RetryPolicy] passed to [Retry]. Returned rather than panicked: a
+	// library that panics on configuration takes down a host at startup, or
+	// mid-request, for something the host could have handled (IR-04).
 	ErrInvalidConfig = errors.New("bastion: invalid configuration")
 )
 

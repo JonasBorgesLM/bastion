@@ -7,12 +7,14 @@ depends on it.
 
 **Zero external dependencies** — the standard library only.
 
-> **Status: early development.** The state machine (B1) and error
-> classification (B2) are implemented and tested — `Execute`, the
-> [`Breaker`](breaker.go) type, `StateClosed` / `StateOpen` / `StateHalfOpen`
-> and their transitions, `WithIsFailure`, and context-cancellation accounting.
-> Retry, timeout, fallback and everything past B2 in the [Roadmap](#roadmap)
-> is not. Breaking changes are still expected before v1.
+> **Status: early development.** The state machine (B1), error classification
+> (B2) and retry with backoff and jitter (B3) are implemented and tested —
+> `Execute`, the [`Breaker`](breaker.go) type, `StateClosed` / `StateOpen` /
+> `StateHalfOpen` and their transitions, `WithIsFailure`,
+> context-cancellation accounting, and [`Retry`](retry.go) with
+> [`RetryPolicy`](retry.go). Timeout needs no code of its own (see the
+> Roadmap). Fallback and everything past B3 in the [Roadmap](#roadmap) is
+> not. Breaking changes are still expected before v1.
 
 ---
 
@@ -112,19 +114,30 @@ of that file is that no metrics library is named anywhere in this module.
 | --- | --- | --- |
 | B1 | State machine, with transition tests on a fake clock | done |
 | B2 | Error classification and context cancellation | done |
-| B3 | Retry with backoff and jitter; timeout via context | |
+| B3 | Retry with backoff and jitter; timeout via context | done |
 | B4 | Named breakers and functional options — validation still open | partial |
 | B5 | Fallback and observability hooks — hooks landed with B1; the fallback needs its own ADR first | partial |
 | B6 | Overhead benchmarks and concurrency tests — a smoke test covers `-race` today; the full suite and the benchmarks are still open | partial |
 | B7 | Documentation, runnable examples, first integration in the gateway | |
 | B8 | v2: adaptive percentage threshold | |
 
+`Retry` composes *around* `Execute`, not inside it — each retry attempt is its
+own, individually admitted and counted call:
+
+```go
+result, err := bastion.Retry(ctx, policy, func(ctx context.Context) (T, error) {
+	return bastion.Execute(ctx, breaker, realOp)
+})
+```
+
 Requirement-by-requirement detail is in [`REQUIREMENTS.md`](REQUIREMENTS.md), and
-the decisions behind B1 and B2's shape — the entry point's exact signature, the
-threshold model, panic accounting, stale-probe recovery, context cancellation —
-are [ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
+the decisions behind B1 through B3's shape — the entry point's exact signature,
+the threshold model, panic accounting, stale-probe recovery, context
+cancellation, the retry/breaker composition order, and why timeout gets no
+helper of its own — are
+[ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
 through
-[ADR-0005](docs/adr/0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md).
+[ADR-0007](docs/adr/0007-no-dedicated-timeout-helper.md).
 A full API section, with install instructions and a quickstart, is B7's job —
 this library still breaks between commits.
 
