@@ -2,6 +2,7 @@ package bastion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"time"
@@ -37,6 +38,15 @@ type RetryPolicy struct {
 	// a recovering service into one thundering herd, which is the failure
 	// retry was supposed to prevent.
 	Jitter float64
+
+	// IsRetriable reports whether err is worth retrying. nil (the default)
+	// retries every error except a rejection from a [Breaker]'s [Execute] —
+	// [ErrOpenState] or [ErrTooManyRequests] — since retrying immediately
+	// after either wastes the backoff wait on a call that was never going to
+	// reach the dependency (ADR-0011). Set a non-nil function to retry
+	// through a rejection anyway, or to also exclude other permanent errors
+	// (a 400, say) from the retry budget.
+	IsRetriable func(error) bool
 }
 
 // validate reports whether p describes anything [Retry] can act on. Checked
@@ -133,7 +143,8 @@ func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 }
 
 // Retry calls op, retrying on error per p, and returns the first success or
-// the last attempt's error once p.MaxAttempts is reached (FR-06).
+// the last attempt's error once p.MaxAttempts is reached, or the first
+// attempt whose error p.IsRetriable rejects (FR-06).
 //
 // Retry has no notion of a [Breaker] and touches none of a Breaker's counters
 // — it composes with one entirely by nesting at the call site, and the
@@ -149,6 +160,15 @@ func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 // FailureThreshold set low relative to MaxAttempts can open the circuit
 // before one logical call's own retry budget is exhausted, on purpose — the
 // threshold counts real attempts against the dependency, not logical calls.
+//
+// An attempt whose error [RetryPolicy.IsRetriable] rejects stops the loop
+// immediately — no further attempt, and no wait beforehand — rather than
+// spending the remaining budget and backoff schedule on a call already known
+// not to be worth repeating (ADR-0011). The default rejects exactly a
+// rejection from a Breaker's own Execute ([ErrOpenState],
+// [ErrTooManyRequests]): recognizing those two sentinel *values* is a
+// materially weaker coupling than Retry referencing a `*Breaker`, which it
+// still never does.
 //
 // The wait between attempts is a timer raced against ctx, never time.Sleep: a
 // context cancelled mid-wait makes Retry return at once, with ctx's own
@@ -171,6 +191,10 @@ func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (
 	}
 
 	maxAttempts := max(p.MaxAttempts, 1)
+	retriable := p.IsRetriable
+	if retriable == nil {
+		retriable = defaultIsRetriable
+	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -182,9 +206,20 @@ func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (
 		if attempt == maxAttempts {
 			break
 		}
+		if !retriable(err) {
+			return zero, err
+		}
 		if werr := sleepRespectingContext(ctx, nextDelay(p, attempt+1)); werr != nil {
 			return zero, werr
 		}
 	}
 	return zero, lastErr
+}
+
+// defaultIsRetriable is used when p.IsRetriable is nil (ADR-0011): every
+// error is retriable except a rejection from a Breaker's own Execute, which
+// never reached the dependency and is not going to reach it on a retry
+// either.
+func defaultIsRetriable(err error) bool {
+	return !errors.Is(err, ErrOpenState) && !errors.Is(err, ErrTooManyRequests)
 }
