@@ -24,6 +24,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0006`](0006-retry-composes-around-the-breaker-not-inside-it.md) | Retry composes around the breaker, not inside it | Accepted | — |
 | [`0007`](0007-no-dedicated-timeout-helper.md) | No dedicated timeout helper — FR-07 is satisfied by documenting the pattern | Accepted | — |
 | [`0008`](0008-fallback-is-a-post-execute-call-site-function.md) | Fallback is a post-Execute, call-site function — never nested inside op | Accepted | — |
+| [`0009`](0009-bastion-plugs-in-first-at-the-gateway.md) | bastion plugs in first at the gateway, and the two host-side rules that composition needs | Accepted | — |
 
 ## Open questions
 
@@ -37,9 +38,8 @@ numbers. The numbers in the first column are for conversation, not for citation.
 
 | # | Question | Needed by |
 | --- | --- | --- |
-| 1 | Where bastion plugs in first. The gateway is the natural candidate — a reverse proxy without resilience is a single point of failure for everything behind it — and the decision belongs on the record rather than in a conversation. The record also fixes the two host-side rules of [`REQUIREMENTS.md`](../../REQUIREMENTS.md) §5.1: `ErrOpenState` maps to `503` with `Retry-After`, and a rejected outbound call does not re-charge the client's `moat` rate-limit budget | B7 |
 
-Eight questions are resolved and removed from this table; see the Index above.
+None open. See the Index above for how each of the nine was resolved.
 Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
 recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)
@@ -52,6 +52,9 @@ per-operation timeout needs library code at all
 [ADR-0007](0007-no-dedicated-timeout-helper.md)).
 One blocked B5 — how the fallback of FR-08 is supplied
 ([ADR-0008](0008-fallback-is-a-post-execute-call-site-function.md)).
+One blocked B7 — where bastion plugs in first, and the two host-side rules
+that composing with `moat` needs
+([ADR-0009](0009-bastion-plugs-in-first-at-the-gateway.md)).
 
 ## Reopening criteria on the record
 
