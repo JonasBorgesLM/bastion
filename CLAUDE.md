@@ -20,14 +20,15 @@ id (`FR-01`, `NFR-05`, `IR-02`…). Decisions live in
 
 ## Current phase
 
-**B1 through B5 done** — the state machine, `Execute`, observability hooks
+**B1 through B6 done** — the state machine, `Execute`, observability hooks
 (pulled forward from B5 into B1; see the note at the end of
 [`hooks.go`](hooks.go)), error classification (FR-04), context-cancellation
 accounting (FR-05), retry with backoff and jitter (FR-06), option validation
-(IR-04), and the fallback (FR-08) are implemented and tested at 100%
-coverage. B6 onward are not. Work is grouped B1 through B8 in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each `TODO(Bn)` in the source
-names the phase that closes it.
+(IR-04), the fallback (FR-08), and the concurrency suite and overhead
+benchmarks (NFR-01, NFR-02; see [`docs/benchmarks.md`](docs/benchmarks.md))
+are implemented and tested at 100% coverage. B7 onward are not. Work is
+grouped B1 through B8 in [`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each
+`TODO(Bn)` in the source names the phase that closes it.
 
 Do not implement a phase whose open question is still open. One question
 remains in [`docs/adr/README.md`](docs/adr/README.md), blocking B7;
