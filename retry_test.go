@@ -189,6 +189,50 @@ func TestRetry_ZeroDelayWithALiveContextRunsEveryAttempt(t *testing.T) {
 	}
 }
 
+// ADR-0012: wrapping the whole Retry call in context.WithTimeout is the
+// documented way to bound total elapsed time, and this proves it delivers
+// the specific semantics a "total budget" is expected to have -- no further
+// attempt starts once the deadline passes, but an attempt already in flight
+// when it passes is not forcibly cut off, because a context deadline is
+// cooperative, not preemptive and Retry has no mechanism that could abort a
+// running op even if it wanted to. op here deliberately outlasts the
+// deadline and ignores ctx, the way a caller who forgot to make it
+// ctx-aware would, to prove the first attempt still runs to completion
+// rather than being interrupted.
+//
+// This exercises the same underlying check (sleepRespectingContext seeing
+// ctx already Done) that TestRetry_ContextCancelledDuringTheWaitReturnsAtOnceWithCtxsOwnError
+// and TestRetry_AlreadyCancelledContextStopsBeforeTheNextWait already cover
+// and verified failing under mutation; this test adds the end-to-end proof
+// specifically for a context.WithTimeout deadline expiring mid-attempt,
+// which those two did not exercise.
+func TestRetry_ContextTimeoutBoundsTotalElapsedTimeWithoutAbortingAnInFlightAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	calls := 0
+	start := time.Now()
+	_, err := bastion.Retry(ctx, bastion.RetryPolicy{MaxAttempts: 3, BaseDelay: 50 * time.Millisecond}, func(context.Context) (int, error) {
+		calls++
+		time.Sleep(60 * time.Millisecond) // outlasts the 20ms deadline, and does not watch ctx
+		return 0, errBoom
+	})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Retry() error = %v, want a match for context.DeadlineExceeded", err)
+	}
+	if calls != 1 {
+		t.Fatalf("op invoked %d times, want exactly 1 -- no attempt should start once the deadline has passed", calls)
+	}
+	if elapsed < 60*time.Millisecond {
+		t.Fatalf("Retry() returned after %s, want at least 60ms -- the in-flight attempt must run to completion, not be cut off at the 20ms deadline", elapsed)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("Retry() took %s, want well under the 50ms BaseDelay for a 2nd attempt -- a second attempt must never start", elapsed)
+	}
+}
+
 // Integration-level proof that Retry's loop is actually wired to nextDelay
 // and a real timer -- nextDelay's own exact math is covered by
 // retry_internal_test.go; this only checks the shape survives the real wait.

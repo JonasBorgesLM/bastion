@@ -186,6 +186,12 @@ the dependency
 Set `IsRetriable` to retry through a rejection anyway, or to exclude other
 permanent errors of your own.
 
+`RetryPolicy` has no field bounding total elapsed time — wrap the whole call
+in `context.WithTimeout` instead. No further attempt starts once `ctx` is
+Done, but an attempt already in flight is not forcibly cut off, since a
+context deadline is cooperative, not preemptive
+([ADR-0012](docs/adr/0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md)).
+
 ### Fallback — `Fallback`
 
 ```go
