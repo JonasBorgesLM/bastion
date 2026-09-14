@@ -182,6 +182,21 @@ func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 // (docs/adr/0007-no-dedicated-timeout-helper.md) if a per-attempt timeout is
 // wanted.
 //
+// RetryPolicy has no field bounding the total time a call to Retry may take;
+// wrap the whole call in [context.WithTimeout] instead:
+//
+//	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+//	defer cancel()
+//	result, err := bastion.Retry(ctx, policy, op)
+//
+// Because a context deadline is cooperative rather than preemptive, this
+// bounds the loop the way a caller asking for a total elapsed-time budget
+// actually wants: no further attempt starts once ctx is Done — the same
+// check that already stops the loop on cancellation, reused here — but an
+// attempt already in flight when the deadline passes is not forcibly cut
+// off; it runs to completion unless op itself watches ctx and returns early
+// (docs/adr/0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md).
+//
 // Retry returns [ErrInvalidConfig] without invoking op at all if p does not
 // describe a policy it can act on.
 func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (T, error)) (T, error) {

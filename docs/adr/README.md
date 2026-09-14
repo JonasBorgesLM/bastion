@@ -27,6 +27,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0009`](0009-bastion-plugs-in-first-at-the-gateway.md) | bastion plugs in first at the gateway, and the two host-side rules that composition needs | Accepted | — |
 | [`0010`](0010-a-hook-panic-never-corrupts-bookkeeping.md) | A hook panic never corrupts bookkeeping; op never running is accounted like a cancelled call, not a failure | Accepted | — |
 | [`0011`](0011-retry-skips-the-wait-after-a-breaker-rejection.md) | Retry skips the wait after a breaker rejection, via a caller-overridable retriability predicate | Accepted | — |
+| [`0012`](0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md) | Retry's total elapsed time is bounded by the caller's context, not a MaxElapsedTime field | Accepted | — |
 
 ## Open questions
 
@@ -42,11 +43,12 @@ numbers. The numbers in the first column are for conversation, not for citation.
 | --- | --- | --- |
 
 None open. See the Index above for how each of the nine original questions
-was resolved. [ADR-0010](0010-a-hook-panic-never-corrupts-bookkeeping.md) and
-[ADR-0011](0011-retry-skips-the-wait-after-a-breaker-rejection.md) are not
-answers to questions from this table — they answer defects the B9 audit
-found (issues #46 and #47/#48), not questions deferred from an earlier
-phase.
+was resolved. [ADR-0010](0010-a-hook-panic-never-corrupts-bookkeeping.md),
+[ADR-0011](0011-retry-skips-the-wait-after-a-breaker-rejection.md), and
+[ADR-0012](0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md)
+are not answers to questions from this table — they answer defects and
+open items the B9 audit found (issues #46, #47/#48, and #49), not
+questions deferred from an earlier phase.
 Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
 recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)
