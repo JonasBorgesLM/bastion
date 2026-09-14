@@ -100,12 +100,9 @@ func WithHooks(h Hooks) Option {
 	return func(o *options) { o.hooks = h }
 }
 
-// TODO(B5): the fallback of FR-08 is not an Option, and the reason is worth
-// recording rather than rediscovering. A fallback produces the call's return
-// value, so it is typed T — and a Go method cannot introduce a type parameter
-// its receiver does not already have. Configuring it on the Breaker would force
-// either a Breaker[T], which defeats one named breaker guarding a dependency
-// called from several call sites with several return types, or an interface{}
-// round trip, which is what generics are here to avoid. The likely answer is
-// that the fallback is an argument at the call site, where its type is known.
-// It needs an ADR before B5, not a decision made in passing.
+// The fallback of FR-08 is deliberately not an Option, and not a method on
+// Breaker: a fallback produces the call's return value, so it is typed T, and
+// a Go method cannot introduce a type parameter its receiver lacks.
+// [Fallback] is a plain function instead, called after [Execute] returns —
+// see docs/adr/0008-fallback-is-a-post-execute-call-site-function.md for why
+// it must run there and never inside op.

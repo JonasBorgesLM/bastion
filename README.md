@@ -8,14 +8,16 @@ depends on it.
 **Zero external dependencies** — the standard library only.
 
 > **Status: early development.** The state machine (B1), error classification
-> (B2), retry with backoff and jitter (B3), and option validation (B4) are
-> implemented and tested — `Execute`, the [`Breaker`](breaker.go) type,
-> `StateClosed` / `StateOpen` / `StateHalfOpen` and their transitions,
-> `WithIsFailure`, context-cancellation accounting, [`Retry`](retry.go) with
-> [`RetryPolicy`](retry.go), and every `With*` option rejecting a
-> configuration `New` will not build a breaker from. Timeout needs no code of
-> its own (see the Roadmap). Fallback and everything past B4 in the
-> [Roadmap](#roadmap) is not. Breaking changes are still expected before v1.
+> (B2), retry with backoff and jitter (B3), option validation (B4), and the
+> fallback (B5) are implemented and tested — `Execute`, the
+> [`Breaker`](breaker.go) type, `StateClosed` / `StateOpen` / `StateHalfOpen`
+> and their transitions, `WithIsFailure`, context-cancellation accounting,
+> [`Retry`](retry.go) with [`RetryPolicy`](retry.go), every `With*` option
+> rejecting a configuration `New` will not build a breaker from, and
+> [`Fallback`](fallback.go), called strictly after `Execute` returns. Timeout
+> needs no code of its own (see the Roadmap). Concurrency and benchmark
+> coverage past a smoke test, and everything past B5 in the
+> [Roadmap](#roadmap), is not. Breaking changes are still expected before v1.
 
 ---
 
@@ -100,6 +102,7 @@ bastion/
 ├── breaker.go    the Breaker type, its construction and its entry point
 ├── state.go      State, its values and its transitions
 ├── retry.go      retry with backoff and jitter — composable, never required
+├── fallback.go   post-Execute fallback — never nested inside op
 ├── clock.go      the Clock interface and the system implementation
 ├── errors.go     the sentinel errors
 ├── options.go    functional options
@@ -117,7 +120,7 @@ of that file is that no metrics library is named anywhere in this module.
 | B2 | Error classification and context cancellation | done |
 | B3 | Retry with backoff and jitter; timeout via context | done |
 | B4 | Named breakers and functional options | done |
-| B5 | Fallback and observability hooks — hooks landed with B1; the fallback needs its own ADR first | partial |
+| B5 | Fallback and observability hooks — hooks landed with B1 | done |
 | B6 | Overhead benchmarks and concurrency tests — a smoke test covers `-race` today; the full suite and the benchmarks are still open | partial |
 | B7 | Documentation, runnable examples, first integration in the gateway | |
 | B8 | v2: adaptive percentage threshold | |
@@ -131,14 +134,24 @@ result, err := bastion.Retry(ctx, policy, func(ctx context.Context) (T, error) {
 })
 ```
 
+`Fallback` composes the same way — strictly after `Execute`, never nested
+inside the operation it wraps, since a fallback that ran inside `op` and
+succeeded would register as a success against the breaker even though the
+real dependency never answered:
+
+```go
+result, err := bastion.Execute(ctx, breaker, realOp)
+result, err = bastion.Fallback(ctx, result, err, myFallback)
+```
+
 Requirement-by-requirement detail is in [`REQUIREMENTS.md`](REQUIREMENTS.md), and
-the decisions behind B1 through B3's shape — the entry point's exact signature,
+the decisions behind B1 through B5's shape — the entry point's exact signature,
 the threshold model, panic accounting, stale-probe recovery, context
-cancellation, the retry/breaker composition order, and why timeout gets no
-helper of its own — are
+cancellation, the retry/breaker composition order, why timeout gets no helper
+of its own, and why fallback runs after `Execute` rather than inside it — are
 [ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
 through
-[ADR-0007](docs/adr/0007-no-dedicated-timeout-helper.md).
+[ADR-0008](docs/adr/0008-fallback-is-a-post-execute-call-site-function.md).
 A full API section, with install instructions and a quickstart, is B7's job —
 this library still breaks between commits.
 
