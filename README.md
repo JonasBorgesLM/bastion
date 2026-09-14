@@ -177,6 +177,15 @@ the operation. The wait between attempts is a timer raced against `ctx`,
 never `time.Sleep`; a cancelled context returns at once with its own error,
 not the previous attempt's.
 
+Composed as shown above, a rejection from the breaker (`ErrOpenState`,
+`ErrTooManyRequests`) stops the loop immediately instead of paying for the
+remaining backoff schedule first — `RetryPolicy.IsRetriable`'s nil default
+excludes exactly those two errors, since a rejected attempt never reached
+the dependency
+([ADR-0011](docs/adr/0011-retry-skips-the-wait-after-a-breaker-rejection.md)).
+Set `IsRetriable` to retry through a rejection anyway, or to exclude other
+permanent errors of your own.
+
 ### Fallback — `Fallback`
 
 ```go

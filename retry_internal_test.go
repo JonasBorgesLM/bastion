@@ -1,6 +1,8 @@
 package bastion
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -135,5 +137,30 @@ func TestNextDelay_OverflowGuardYieldsToAnExplicitMaxDelay(t *testing.T) {
 	p := RetryPolicy{BaseDelay: time.Millisecond, MaxDelay: overflowGuard * 2}
 	if got := nextDelay(p, 1000); got != p.MaxDelay {
 		t.Fatalf("nextDelay(attempt=1000) = %s, want exactly MaxDelay (%s)", got, p.MaxDelay)
+	}
+}
+
+// ADR-0011: defaultIsRetriable, tested directly since it is unexported and
+// has no other observable surface than the behavior Retry's own black-box
+// tests already exercise end to end.
+func TestDefaultIsRetriable(t *testing.T) {
+	ordinary := errors.New("boom")
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"an ordinary error is retriable", ordinary, true},
+		{"ErrOpenState is not retriable", ErrOpenState, false},
+		{"ErrTooManyRequests is not retriable", ErrTooManyRequests, false},
+		{"a wrapped ErrOpenState is not retriable", fmt.Errorf("wrapped: %w", ErrOpenState), false},
+		{"a wrapped ErrTooManyRequests is not retriable", fmt.Errorf("wrapped: %w", ErrTooManyRequests), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := defaultIsRetriable(tt.err); got != tt.want {
+				t.Errorf("defaultIsRetriable(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

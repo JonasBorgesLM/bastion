@@ -98,3 +98,28 @@ Not deferred. If a real caller needs "the breaker judges the logical request,
 not the raw attempt count," that is a legitimate, different use case — served
 today by nesting the other way at that specific call site, not by changing
 this library's recommendation.
+
+## Amendment (ADR-0011)
+
+Point 2's claim — "every subsequent attempt inside a live retry loop gets
+`ErrOpenState` back immediately, without touching the network and without
+waiting out the backoff that would otherwise precede it" — did not hold as
+written. Measured against the published v0.1.0 (issue #47, found by audit):
+`Retry`'s loop slept the full `nextDelay` after *any* non-nil error,
+including `ErrOpenState`, so a rejected attempt still paid for the backoff
+that would have preceded the *next* attempt before discovering there would be
+no next attempt worth making. `FailureThreshold(1)` with `MaxAttempts(4)` and
+`BaseDelay(200ms)`: one real network call, then 1.4s of backoff waited out
+across three attempts that never reached the dependency.
+
+Point 2 also claimed "Retry needs no special knowledge of the breaker to
+benefit from this." That half did not hold either, once the actual fix was
+designed: making the *wait* stop, not just the *attempt*, requires `Retry` to
+recognize that a specific error means "do not wait, do not try again" — and
+the only error that carries that meaning is one bastion itself defines.
+ADR-0011 records the mechanism and reasons about exactly how much of the
+original claim survives.
+
+Neither the composition recommendation (Retry wraps the breaker) nor reasons
+1 and 3 for it are affected. Only the second half of point 2 is superseded,
+by [ADR-0011](0011-retry-skips-the-wait-after-a-breaker-rejection.md).
