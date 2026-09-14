@@ -20,22 +20,23 @@ id (`FR-01`, `NFR-05`, `IR-02`…). Decisions live in
 
 ## Current phase
 
-**B1 through B6 done** — the state machine, `Execute`, observability hooks
-(pulled forward from B5 into B1; see the note at the end of
-[`hooks.go`](hooks.go)), error classification (FR-04), context-cancellation
-accounting (FR-05), retry with backoff and jitter (FR-06), option validation
-(IR-04), the fallback (FR-08), and the concurrency suite and overhead
-benchmarks (NFR-01, NFR-02; see [`docs/benchmarks.md`](docs/benchmarks.md))
-are implemented and tested at 100% coverage. B7 onward are not. Work is
-grouped B1 through B8 in [`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each
-`TODO(Bn)` in the source names the phase that closes it.
+**B1 through B6 done, B7 in progress** — the state machine, `Execute`,
+observability hooks (pulled forward from B5 into B1; see the note at the end
+of [`hooks.go`](hooks.go)), error classification (FR-04),
+context-cancellation accounting (FR-05), retry with backoff and jitter
+(FR-06), option validation (IR-04), the fallback (FR-08), and the
+concurrency suite and overhead benchmarks (NFR-01, NFR-02; see
+[`docs/benchmarks.md`](docs/benchmarks.md)) are implemented and tested at
+100% coverage. Of B7: documentation and runnable examples are done; the
+release workflow and the gateway integration (a separate repository) are
+not. Work is grouped B1 through B8 in [`REQUIREMENTS.md`](REQUIREMENTS.md)
+§7, and each `TODO(Bn)` in the source names the phase that closes it.
 
-Do not implement a phase whose open question is still open. One question
-remains in [`docs/adr/README.md`](docs/adr/README.md), blocking B7;
+No open questions remain in [`docs/adr/README.md`](docs/adr/README.md);
 [ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
 through
-[ADR-0008](docs/adr/0008-fallback-is-a-post-execute-call-site-function.md)
-record the eight resolved so far.
+[ADR-0009](docs/adr/0009-bastion-plugs-in-first-at-the-gateway.md)
+record the nine resolved so far.
 
 ## Repository layout
 
