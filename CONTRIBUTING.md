@@ -44,8 +44,8 @@ Conventional Commits, enforced by the `commits` job on every commit in the PR
 
 - **Types:** `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`,
   `chore`, `revert`
-- **Scopes:** `breaker`, `state`, `retry`, `clock`, `hooks`, `options`,
-  `errors`, `adr`, `docs`, `deps`, `ci`
+- **Scopes:** `breaker`, `state`, `retry`, `fallback`, `clock`, `hooks`,
+  `options`, `errors`, `adr`, `docs`, `deps`, `ci`
 - Subject: 72 characters or fewer, no trailing period, imperative mood
 
 ```
