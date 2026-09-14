@@ -4,11 +4,12 @@
 //
 // # Status
 //
-// Early development. B1 through B5 — the state machine, [Execute], the
+// Early development. B1 through B6 — the state machine, [Execute], the
 // hooks that report it, error classification via [WithIsFailure],
 // context-cancellation accounting, [Retry] with [RetryPolicy], every
 // [Option] rejecting a configuration [New] will not build a breaker from,
-// and [Fallback] — are implemented and tested. Everything past B5 in
+// [Fallback], and a concurrency suite and overhead benchmarks (see
+// docs/benchmarks.md) — are implemented and tested. Everything past B6 in
 // REQUIREMENTS.md's phase table is not, and every identifier below may
 // still change before v1.
 //

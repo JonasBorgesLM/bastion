@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -564,11 +565,10 @@ func TestExecute_OnCallCarriesASyntheticErrorForAPanic(t *testing.T) {
 	}
 }
 
-// TODO(B6): the full concurrency suite of NFR-01 and the overhead
-// benchmarks of NFR-02 (breaker_bench_test.go). This is a smoke test proving
-// the admission/completion design is race-free under go test -race, not a
-// substitute for it -- it makes no assertion about the breaker's end state,
-// only that concurrent access to it never races.
+// This is a smoke test proving the admission/completion design is race-free
+// under go test -race in the broad, mixed-traffic case. It makes no
+// assertion about the breaker's end state -- the three tests below it do,
+// each targeting one specific concurrency claim of NFR-01.
 func TestExecute_ConcurrentCallsDoNotRace(t *testing.T) {
 	clock := newFakeClock()
 	b, err := bastion.New("dep", bastion.WithFailureThreshold(3), bastion.WithClock(clock))
@@ -590,4 +590,166 @@ func TestExecute_ConcurrentCallsDoNotRace(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// NFR-01: many goroutines racing the exact instant a threshold of 1 is
+// reached must still transition the circuit exactly once. This stresses
+// complete's "the state has since moved on" guard specifically -- with 50
+// goroutines released simultaneously and FailureThreshold(1), every one of
+// them is admitted while the circuit is still Closed (they all read
+// b.state == StateClosed before any of them has completed), so all 50
+// concurrently race to be the one that flips it to Open. Exactly one
+// OnStateChange event must fire; a duplicated or lost transition would show
+// up as a count other than 1, not as a panic or a race.
+func TestExecute_ConcurrentCallsAcrossAStateTransition(t *testing.T) {
+	clock := newFakeClock()
+	var mu sync.Mutex
+	var events []bastion.StateChangeEvent
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnStateChange: func(_ context.Context, ev bastion.StateChangeEvent) {
+				mu.Lock()
+				events = append(events, ev)
+				mu.Unlock()
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	const goroutines = 50
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // released together, to maximize contention at admission
+			_, _ = bastion.Execute(context.Background(), b, failingOp)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := b.State(); got != bastion.StateOpen {
+		t.Fatalf("State() after %d concurrent failures with FailureThreshold(1) = %v, want %v", goroutines, got, bastion.StateOpen)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("got %d OnStateChange events, want exactly 1 (a transition counted twice, or lost and recovered by a second call, both show up here): %+v", len(events), events)
+	}
+	if events[0].From != bastion.StateClosed || events[0].To != bastion.StateOpen {
+		t.Fatalf("event = %+v, want From=Closed To=Open", events[0])
+	}
+}
+
+// NFR-01: State() must be safe to call concurrently with the writes that
+// transition the breaker it reads. The state-transition tests already prove
+// State() is *correct*; this proves it is safe to call from a goroutine that
+// is not also the one driving Execute -- go test -race is the actual
+// assertion here, since State()'s possible return values are already
+// exhaustively enumerated by State's own type.
+func TestExecute_ConcurrentStateReadsDuringATransition(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(5), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 10 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = b.State()
+				}
+			}
+		}()
+	}
+
+	var writers sync.WaitGroup
+	for range 50 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			_, _ = bastion.Execute(context.Background(), b, failingOp)
+		}()
+	}
+	writers.Wait()
+	close(stop)
+	readers.Wait()
+}
+
+// NFR-01: "the half-open allowance holds under concurrent probes -- this is
+// where an off-by-one admits two calls where it promised one." 20 goroutines
+// released simultaneously against WithHalfOpenMaxCalls(3): each op sleeps
+// briefly before returning success, long enough that every goroutine's
+// admission decision -- a fast, non-blocking mutex operation -- has already
+// happened before any of the admitted probes completes. Exactly 3 must be
+// admitted (the real operation invoked, a nil error), and the remaining 17
+// must be rejected with ErrTooManyRequests without the operation running at
+// all.
+func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithHalfOpenMaxCalls(3),
+		bastion.WithClock(clock),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	clock.Advance(10 * time.Second)
+
+	const goroutines = 20
+	var realOpInvocations, admitted, rejected int64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+				atomic.AddInt64(&realOpInvocations, 1)
+				time.Sleep(30 * time.Millisecond)
+				return 42, nil
+			})
+			switch {
+			case err == nil:
+				atomic.AddInt64(&admitted, 1)
+			case errors.Is(err, bastion.ErrTooManyRequests):
+				atomic.AddInt64(&rejected, 1)
+			default:
+				t.Errorf("Execute() error = %v, want nil or a match for ErrTooManyRequests", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt64(&realOpInvocations); got != 3 {
+		t.Fatalf("the real operation ran %d times, want exactly 3 (WithHalfOpenMaxCalls)", got)
+	}
+	if got := atomic.LoadInt64(&admitted); got != 3 {
+		t.Fatalf("%d goroutines were admitted, want exactly 3", got)
+	}
+	if got := atomic.LoadInt64(&rejected); got != goroutines-3 {
+		t.Fatalf("%d goroutines were rejected, want exactly %d", got, goroutines-3)
+	}
+	if got := b.State(); got != bastion.StateClosed {
+		t.Fatalf("State() after a successful probe resolved the window = %v, want %v", got, bastion.StateClosed)
+	}
 }
