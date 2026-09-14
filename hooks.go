@@ -10,6 +10,14 @@ import "context"
 // the request behind it. Route these into a proper observability pipeline —
 // asynchronously, from the host — rather than doing slow work here.
 //
+// A handler that panics cannot corrupt bastion's own bookkeeping, and cannot
+// prevent the guarded operation from running — the panic is recovered,
+// bastion's own accounting for the call completes normally, and only then is
+// the panic re-raised to the caller of [Execute], visible exactly where an
+// operation's own panic already is. See
+// docs/adr/0010-a-hook-panic-never-corrupts-bookkeeping.md for the full
+// reasoning, including how a handler calling runtime.Goexit is handled.
+//
 // This is the whole of the library's observability surface, and it is
 // deliberately made of plain functions and plain structs. Nothing here names a
 // metrics library, so a host wires bastion to whatever it already uses without
