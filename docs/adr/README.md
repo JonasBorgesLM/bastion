@@ -23,6 +23,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0005`](0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md) | Context cancellation is detected by reading the outer ctx, not by matching the returned error | Accepted | — |
 | [`0006`](0006-retry-composes-around-the-breaker-not-inside-it.md) | Retry composes around the breaker, not inside it | Accepted | — |
 | [`0007`](0007-no-dedicated-timeout-helper.md) | No dedicated timeout helper — FR-07 is satisfied by documenting the pattern | Accepted | — |
+| [`0008`](0008-fallback-is-a-post-execute-call-site-function.md) | Fallback is a post-Execute, call-site function — never nested inside op | Accepted | — |
 
 ## Open questions
 
@@ -36,10 +37,9 @@ numbers. The numbers in the first column are for conversation, not for citation.
 
 | # | Question | Needed by |
 | --- | --- | --- |
-| 1 | How the fallback of FR-08 is supplied. It is typed by the call's return value, and a method cannot introduce a type parameter its receiver lacks — see the note at the end of [`options.go`](../../options.go) | B5 |
-| 2 | Where bastion plugs in first. The gateway is the natural candidate — a reverse proxy without resilience is a single point of failure for everything behind it — and the decision belongs on the record rather than in a conversation. The record also fixes the two host-side rules of [`REQUIREMENTS.md`](../../REQUIREMENTS.md) §5.1: `ErrOpenState` maps to `503` with `Retry-After`, and a rejected outbound call does not re-charge the client's `moat` rate-limit budget | B7 |
+| 1 | Where bastion plugs in first. The gateway is the natural candidate — a reverse proxy without resilience is a single point of failure for everything behind it — and the decision belongs on the record rather than in a conversation. The record also fixes the two host-side rules of [`REQUIREMENTS.md`](../../REQUIREMENTS.md) §5.1: `ErrOpenState` maps to `503` with `Retry-After`, and a rejected outbound call does not re-charge the client's `moat` rate-limit budget | B7 |
 
-Seven questions are resolved and removed from this table; see the Index above.
+Eight questions are resolved and removed from this table; see the Index above.
 Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
 recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)
@@ -50,6 +50,8 @@ Two blocked B3 — the retry/breaker composition order, and whether the
 per-operation timeout needs library code at all
 ([ADR-0006](0006-retry-composes-around-the-breaker-not-inside-it.md),
 [ADR-0007](0007-no-dedicated-timeout-helper.md)).
+One blocked B5 — how the fallback of FR-08 is supplied
+([ADR-0008](0008-fallback-is-a-post-execute-call-site-function.md)).
 
 ## Reopening criteria on the record
 
