@@ -48,3 +48,42 @@ to look for.
 
 Pre-1.0. Only the latest tag receives fixes. There are no backports, and there
 is nothing to back-port to yet.
+
+## Provenance
+
+Every release answers two different questions, checked two different ways
+([ADR-0013](docs/adr/0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md)):
+
+**Who authorized this tag** — verify the signature against the maintainer's
+key in [`.github/allowed_signers`](.github/allowed_signers):
+
+```bash
+git clone https://github.com/JonasBorgesLM/bastion && cd bastion
+git config gpg.ssh.allowedSignersFile .github/allowed_signers
+git verify-tag v0.1.0
+```
+
+**Did this content pass bastion's own CI gates before being tagged** —
+verify the attestation on the source tarball GitHub attaches to the release
+(`bastion-<version>.tar`):
+
+```bash
+gh release download v0.1.0 -R JonasBorgesLM/bastion -p 'bastion-*.tar'
+gh attestation verify bastion-v0.1.0.tar -R JonasBorgesLM/bastion
+```
+
+This confirms the tarball was produced by bastion's own `release.yml`
+workflow, at the tagged commit, after `go vet`, `go test -race`,
+`govulncheck`, the zero-dependency/no-`net/http` boundary, and
+`check-docs.sh` all passed. It is not a claim about the exact bytes
+`go get` resolves — `proxy.golang.org` assembles that independently, and
+`sum.golang.org`'s transparency log is what already guarantees that content
+is unchanged since anyone first fetched it. A security-conscious consumer
+who wants the reproducibility guarantee on top of the CI-provenance one can
+regenerate the same tarball from the tagged commit and compare digests:
+
+```bash
+git archive --format=tar --prefix=bastion-v0.1.0/ \
+  --output=bastion-v0.1.0.tar v0.1.0
+sha256sum bastion-v0.1.0.tar
+```
