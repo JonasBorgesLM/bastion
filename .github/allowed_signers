@@ -1,11 +1,7 @@
 # SSH keys allowed to sign release tags, checked by the `release` job in
 # .github/workflows/release.yml.
 #
-# THIS FILE IS EMPTY, AND THAT BLOCKS EVERY RELEASE. That is deliberate: an
-# unsigned release is one nobody can attribute, and a check that warns instead
-# of failing gates nothing.
-#
-# To populate it, from the machine that will cut tags:
+# To add another key, from the machine that will cut tags:
 #
 #   ssh-add -L                      # or: cat ~/.ssh/id_ed25519.pub
 #
@@ -13,10 +9,14 @@
 #
 #   <email> namespaces="git" ssh-ed25519 AAAA...
 #
-# and configure git to sign tags with it:
+# and configure git to sign tags with it (locally, per repository -- a global
+# gpgsign default silently signs every tag in every repo on the machine,
+# including ones that never asked for it):
 #
-#   git config --global gpg.format ssh
-#   git config --global user.signingkey ~/.ssh/id_ed25519.pub
-#   git config --global tag.gpgsign true
+#   git config gpg.format ssh
+#   git config user.signingkey ~/.ssh/id_ed25519.pub
+#   git config tag.gpgsign true
 #
 # See RELEASING.md, "Tagging".
+
+jonasleo92@yahoo.com.br namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAoMtarMawZsFsEu/l5bi9M2zVYoGWEfzVAhk5TkXIN1
