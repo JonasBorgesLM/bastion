@@ -18,18 +18,17 @@ var (
 	// operation was never invoked.
 	ErrTooManyRequests = errors.New("bastion: too many requests in half-open state")
 
-	// ErrInvalidConfig reports that New was given a configuration it will not
-	// build a Breaker from. Returned rather than panicked: a library that
-	// panics on configuration takes down a host at startup for something the
-	// host could have handled (IR-04).
+	// ErrInvalidConfig reports that a configuration value this library was
+	// given does not describe anything it can act on: [New]'s options, or a
+	// [RetryPolicy] passed to [Retry]. Returned rather than panicked: a
+	// library that panics on configuration takes down a host at startup, or
+	// mid-request, for something the host could have handled (IR-04).
 	ErrInvalidConfig = errors.New("bastion: invalid configuration")
 )
 
-// TODO(B2): the accounting of context cancellation (FR-05).
-//
-// A cancelled context is neither a success nor a failure of the remote service:
-// counting it as a failure lets a client-side deadline open a circuit that
-// nothing is wrong behind, and counting it as a success hides a dependency that
-// is genuinely slow. The open question is on the record as "how context
-// cancellation is accounted for" in docs/adr/README.md, and is decided before
-// this is implemented.
+// A cancelled context is accounted for as neither a success nor a failure
+// (FR-05, ADR-0005) in [Execute], not by an error here: there is no sentinel
+// for it, because op's own error — including op's own context.Canceled or
+// context.DeadlineExceeded, if it returns one — always reaches the caller
+// exactly as op returned it. Cancellation changes only what the breaker does
+// with the outcome internally.

@@ -20,15 +20,23 @@ id (`FR-01`, `NFR-05`, `IR-02`…). Decisions live in
 
 ## Current phase
 
-**Pre-implementation.** The package skeleton, CI and conventions are in place;
-no state machine exists yet. Work is grouped B1 through B8 in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §7, and each `TODO(Bn)` in the source names
-the phase that closes it.
+**B1 through B6 done, B7 in progress** — the state machine, `Execute`,
+observability hooks (pulled forward from B5 into B1; see the note at the end
+of [`hooks.go`](hooks.go)), error classification (FR-04),
+context-cancellation accounting (FR-05), retry with backoff and jitter
+(FR-06), option validation (IR-04), the fallback (FR-08), and the
+concurrency suite and overhead benchmarks (NFR-01, NFR-02; see
+[`docs/benchmarks.md`](docs/benchmarks.md)) are implemented and tested at
+100% coverage. Of B7: documentation and runnable examples are done; the
+release workflow and the gateway integration (a separate repository) are
+not. Work is grouped B1 through B8 in [`REQUIREMENTS.md`](REQUIREMENTS.md)
+§7, and each `TODO(Bn)` in the source names the phase that closes it.
 
-Do not implement a phase whose open question is still open. Four of the seven
-questions in [`docs/adr/README.md`](docs/adr/README.md) block B1 through B5, and
-one of them — the entry point's name and signature — cannot be corrected after
-release without breaking every caller.
+No open questions remain in [`docs/adr/README.md`](docs/adr/README.md);
+[ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
+through
+[ADR-0009](docs/adr/0009-bastion-plugs-in-first-at-the-gateway.md)
+record the nine resolved so far.
 
 ## Repository layout
 
@@ -127,8 +135,8 @@ are bastion's own:
 - **English** for all code, comments, documentation and commit messages
   (NFR-08), regardless of the language a request was written in.
 - **Commit scopes** are this package's concepts: `breaker`, `state`, `retry`,
-  `clock`, `hooks`, `options`, `errors`, `adr`, `docs`, `deps`, `ci`. The
-  `commits` CI job rejects anything else.
+  `fallback`, `clock`, `hooks`, `options`, `errors`, `adr`, `docs`, `deps`,
+  `ci`. The `commits` CI job rejects anything else.
 - **Every structural decision gets an ADR**, written before the code. Do not
   silently resolve a question listed as open in
   [`docs/adr/README.md`](docs/adr/README.md).

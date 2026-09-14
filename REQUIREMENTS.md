@@ -189,6 +189,7 @@ bastion/
 ├── breaker.go      the Breaker type, its construction and its entry point
 ├── state.go        State, its values and its transitions
 ├── retry.go        retry with backoff and jitter — composable, never required
+├── fallback.go     post-Execute fallback (ADR-0008) — never nested inside op
 ├── clock.go        the Clock interface and the system implementation
 ├── errors.go       ErrOpenState, ErrTooManyRequests and the rest
 ├── options.go      functional options

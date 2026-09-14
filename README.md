@@ -7,9 +7,24 @@ depends on it.
 
 **Zero external dependencies** — the standard library only.
 
-> **Status: pre-implementation.** The requirements, the conventions and the
-> pipeline that enforces them are in place. The domain code is not written.
-> Nothing here is importable yet — see [Roadmap](#roadmap).
+```go
+breaker, err := bastion.New("payments-api", bastion.WithFailureThreshold(5))
+if err != nil {
+    log.Fatal(err)
+}
+
+result, err := bastion.Execute(ctx, breaker, func(ctx context.Context) (Response, error) {
+    return client.Call(ctx, request)
+})
+```
+
+> **Status: pre-v1, not yet tagged.** The full surface documented in
+> [Usage](#usage) below — `Execute`, `Retry`, `Fallback`, every option, every
+> hook — is implemented and tested at 100% statement coverage
+> ([`docs/benchmarks.md`](docs/benchmarks.md) has the overhead numbers). What
+> is not done is release engineering: no version has been tagged, and the API
+> may still change before one is. See the [Roadmap](#roadmap) for what
+> remains.
 
 ---
 
@@ -84,6 +99,129 @@ a sales page.
   [`moat`](https://github.com/JonasBorgesLM/moat) and
   [`crier`](https://github.com/JonasBorgesLM/crier).
 
+## Install
+
+```sh
+go get github.com/JonasBorgesLM/bastion
+```
+
+Requires **Go 1.24+** — the floor is the ecosystem's own (matching `moat` and
+`cairn`), not a feature this module needs for itself; see the comment in
+[`go.mod`](go.mod). No `require` line, and none is expected: the
+`boundaries` CI job fails the build the day one appears.
+
+## Usage
+
+The whole surface, grouped by what each piece does. Full contracts are in
+each identifier's own godoc; ADRs cited below are where the reasoning for a
+non-obvious choice lives.
+
+### Guard a call — `Execute`
+
+```go
+result, err := bastion.Execute(ctx, breaker, func(ctx context.Context) (T, error) {
+	return realOp(ctx)
+})
+```
+
+`Execute` is the entry point, generic over the operation's result type
+([ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)).
+`op`'s own return value and error reach the caller unchanged on every path.
+A rejected call returns [`ErrOpenState`](errors.go) or
+[`ErrTooManyRequests`](errors.go) without invoking `op` at all. A panic in
+`op` is recovered, counted as a failure, and re-raised with its original
+value once the breaker's own bookkeeping is done
+([ADR-0003](docs/adr/0003-a-panic-always-counts-as-a-failure-and-is-re-raised.md)).
+A context the caller cancels counts as neither a success nor a failure
+([ADR-0005](docs/adr/0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md)).
+
+### Construct one — `New` and its options
+
+```go
+breaker, err := bastion.New("payments-api",
+	bastion.WithFailureThreshold(5),   // consecutive failures before Open (default 5)
+	bastion.WithOpenTimeout(30*time.Second), // how long Open lasts before a probe (default 30s)
+	bastion.WithHalfOpenMaxCalls(1),   // probes admitted per Half-Open window (default 1)
+	bastion.WithIsFailure(myClassifier), // decide what counts as a failure (default: any non-nil error)
+	bastion.WithHooks(bastion.Hooks{...}),
+)
+```
+
+`name` is required and appears in every hook event; it is an identifier for
+an operator, not a key — `New` registers nothing anywhere, and two breakers
+sharing a name are still two independent breakers. Every option above is
+validated: a non-positive threshold, timeout, or allowance, or a nil
+`Clock`, returns [`ErrInvalidConfig`](errors.go) rather than building a
+breaker that would misbehave later. `WithClock` exists for tests — see
+[`Clock`](clock.go) — hosts leave it at the default `SystemClock`.
+
+### Retry — `Retry` and `RetryPolicy`
+
+```go
+result, err := bastion.Retry(ctx, bastion.RetryPolicy{
+	MaxAttempts: 3,
+	BaseDelay:   100 * time.Millisecond,
+	MaxDelay:    2 * time.Second,
+	Jitter:      0.5,
+}, func(ctx context.Context) (T, error) {
+	return bastion.Execute(ctx, breaker, realOp)
+})
+```
+
+`Retry` composes *around* `Execute`, never inside it — each attempt is its
+own, individually admitted and counted call
+([ADR-0006](docs/adr/0006-retry-composes-around-the-breaker-not-inside-it.md)).
+An invalid policy (a negative field, or `MaxDelay` below `BaseDelay`, or
+`Jitter` outside `[0, 1]`) returns `ErrInvalidConfig` without ever calling
+the operation. The wait between attempts is a timer raced against `ctx`,
+never `time.Sleep`; a cancelled context returns at once with its own error,
+not the previous attempt's.
+
+### Fallback — `Fallback`
+
+```go
+result, err := bastion.Execute(ctx, breaker, realOp)
+result, err = bastion.Fallback(ctx, result, err, func(ctx context.Context, err error) (T, error) {
+	return cachedOrDefaultValue, nil
+})
+```
+
+Always called *after* `Execute` returns, never nested inside the operation
+it wraps — nesting it would let the fallback's own success register as a
+success against the breaker
+([ADR-0008](docs/adr/0008-fallback-is-a-post-execute-call-site-function.md)).
+Runs on any non-nil `err` — a rejection or a genuine failure, treated
+alike — except when the caller's own `ctx` is already cancelled, in which
+case `Fallback` does nothing further on their behalf.
+
+### Timeout — no function, just `context.WithTimeout`
+
+```go
+ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+defer cancel()
+result, err := bastion.Execute(ctx, breaker, realOp)
+```
+
+No bastion-specific wrapper exists for this on purpose: `go vet`'s
+`lostcancel` analyzer already catches the one mistake this pattern
+invites, forgetting `cancel`
+([ADR-0007](docs/adr/0007-no-dedicated-timeout-helper.md)).
+
+### Observability — `Hooks`
+
+```go
+bastion.WithHooks(bastion.Hooks{
+	OnStateChange: func(ctx context.Context, ev bastion.StateChangeEvent) { ... },
+	OnCall:        func(ctx context.Context, ev bastion.CallEvent) { ... },
+	OnReject:      func(ctx context.Context, ev bastion.RejectEvent) { ... },
+})
+```
+
+Every field may be `nil`; `nil` is a no-op. Handlers run synchronously, on
+the calling goroutine — route them into your own metrics or logging
+pipeline asynchronously from there, since a slow handler here blocks the
+request behind it.
+
 ## Design shape
 
 One flat package. No subpackage until something earns one.
@@ -94,6 +232,7 @@ bastion/
 ├── breaker.go    the Breaker type, its construction and its entry point
 ├── state.go      State, its values and its transitions
 ├── retry.go      retry with backoff and jitter — composable, never required
+├── fallback.go   post-Execute fallback — never nested inside op
 ├── clock.go      the Clock interface and the system implementation
 ├── errors.go     the sentinel errors
 ├── options.go    functional options
@@ -105,21 +244,46 @@ of that file is that no metrics library is named anywhere in this module.
 
 ## Roadmap
 
-| Phase | Scope |
-| --- | --- |
-| B1 | State machine, with transition tests on a fake clock |
-| B2 | Error classification and context cancellation |
-| B3 | Retry with backoff and jitter; timeout via context |
-| B4 | Named breakers and functional options |
-| B5 | Fallback and observability hooks |
-| B6 | Overhead benchmarks and concurrency tests |
-| B7 | Documentation, runnable examples, first integration in the gateway |
-| B8 | v2: adaptive percentage threshold |
+| Phase | Scope | |
+| --- | --- | --- |
+| B1 | State machine, with transition tests on a fake clock | done |
+| B2 | Error classification and context cancellation | done |
+| B3 | Retry with backoff and jitter; timeout via context | done |
+| B4 | Named breakers and functional options | done |
+| B5 | Fallback and observability hooks — hooks landed with B1 | done |
+| B6 | Overhead benchmarks and concurrency tests | done |
+| B7 | Documentation and examples done; release workflow and the gateway integration (a separate repository) remain | partial |
+| B8 | v2: adaptive percentage threshold | |
 
-Requirement-by-requirement detail is in [`REQUIREMENTS.md`](REQUIREMENTS.md).
-There is no API documented in this README yet, deliberately: the entry point's
-name and signature are an open question on the record, and documenting an API
-before it exists is how a README starts lying.
+`Retry` composes *around* `Execute`, not inside it — each retry attempt is its
+own, individually admitted and counted call:
+
+```go
+result, err := bastion.Retry(ctx, policy, func(ctx context.Context) (T, error) {
+	return bastion.Execute(ctx, breaker, realOp)
+})
+```
+
+`Fallback` composes the same way — strictly after `Execute`, never nested
+inside the operation it wraps, since a fallback that ran inside `op` and
+succeeded would register as a success against the breaker even though the
+real dependency never answered:
+
+```go
+result, err := bastion.Execute(ctx, breaker, realOp)
+result, err = bastion.Fallback(ctx, result, err, myFallback)
+```
+
+Requirement-by-requirement detail is in [`REQUIREMENTS.md`](REQUIREMENTS.md), and
+the decisions behind the shapes above — the entry point's exact signature,
+the threshold model, panic accounting, stale-probe recovery, context
+cancellation, the retry/breaker composition order, why timeout gets no helper
+of its own, why fallback runs after `Execute` rather than inside it, and where
+`bastion` plugs in first — are every ADR from
+[ADR-0001](docs/adr/0001-entry-point-is-a-free-generic-function-named-execute.md)
+through
+[ADR-0009](docs/adr/0009-bastion-plugs-in-first-at-the-gateway.md).
+This library still breaks between commits before a first tagged release.
 
 ## The ecosystem
 

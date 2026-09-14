@@ -265,7 +265,7 @@ jobs:
       - name: Every commit in this PR follows the convention
         run: |
           types='feat|fix|docs|test|refactor|perf|build|ci|chore|revert'
-          scopes='breaker|state|retry|clock|hooks|options|errors|adr|docs|deps|ci'
+          scopes='breaker|state|retry|fallback|clock|hooks|options|errors|adr|docs|deps|ci'
           pattern="^($types)(\\(($scopes)\\))?!?: .+"
           base='${{ github.event.pull_request.base.sha }}'
           bad=0
@@ -313,7 +313,7 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           types='feat|fix|docs|test|refactor|perf|build|ci|chore|revert'
-          scopes='breaker|state|retry|clock|hooks|options|errors|adr|docs|deps|ci'
+          scopes='breaker|state|retry|fallback|clock|hooks|options|errors|adr|docs|deps|ci'
           if ! printf '%s' "$TITLE" | grep -qE "^($types)(\\(($scopes)\\))?!?: .+"; then
             echo "::error::PR title is not a conventional commit: $TITLE"
             exit 1

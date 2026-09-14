@@ -67,6 +67,16 @@ type RejectEvent struct {
 	Reason error
 }
 
-// TODO(B5): the call sites. Every hook is invoked from exactly one place, and
-// each needs a test asserting it fires with the right event — including the
-// nil-handler case, which must not panic.
+// The call sites are in breaker.go's Execute: OnStateChange from
+// fireStateChange, called after admission and again after completion, each
+// only when a transition actually happened; OnCall and OnReject inline,
+// each from exactly one place. Every one is covered in breaker_test.go,
+// including the nil-handler case.
+//
+// Landed with B1 rather than B5 as REQUIREMENTS.md's phase table originally
+// grouped it: firing these three events *is* reporting the state machine's
+// own transitions and outcomes, so writing Execute without them meant either
+// leaving OnStateChange's own doc comment false, or rewriting the same call
+// sites a second time later for no reason. FR-08's fallback is the part of B5
+// that is still genuinely deferred — it needs the ADR in
+// docs/adr/README.md first, unlike this.
