@@ -1,0 +1,213 @@
+# Release (CD).
+#
+# bastion is a library: it ships source, not a binary, so there is no build
+# matrix here and no artifact but the tag itself. What this workflow does
+# instead is refuse to publish a release that cannot be consumed, verified, or
+# attributed -- fail closed, per issue #33. Written deliberately late, per
+# RELEASING.md's own "Not yet automated" section: a publishing pipeline
+# written before the first release is one nobody has watched succeed.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  # The library floor (NFR-07).
+  GO_VERSION: "1.24"
+  # The newest supported toolchain -- verification runs here, the same
+  # reasoning ci.yml's own GO_SUPPORTED_VERSION comment gives: a release
+  # verified only at its floor is checked against a standard library that no
+  # longer receives fixes.
+  GO_SUPPORTED_VERSION: "stable"
+  GOVULNCHECK_VERSION: "v1.7.0"
+  # golang.org/x/exp carries no tagged releases -- this is the exact
+  # pseudo-version, not a placeholder, matching the pin cairn's own
+  # release.yml uses for the same tool and the same reason. Bump on a stated
+  # trigger: an output change that breaks the API-diff parsing below, or a bug
+  # this repository actually hits. Never on a schedule.
+  GORELEASE_VERSION: "v0.0.0-20260824195058-e88cd73687aa"
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      toolchain: ${{ steps.toolchain.outputs.version }}
+    steps:
+      # Full tag history: the API-diff step below finds the previous release
+      # by listing this repository's own tags, which a shallow checkout would
+      # not have.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_SUPPORTED_VERSION }}
+          cache-dependency-path: go.mod
+
+      - id: toolchain
+        run: |
+          echo "verified with $(go version)"
+          echo "version=$(go version | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      # A tag pushed out of order -- an old one re-pushed, or a checkout that
+      # somehow lost history -- must not silently produce a diff or release
+      # notes for the wrong version.
+      - name: This tag is the newest one
+        run: |
+          tag='${{ github.ref_name }}'
+          newest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ "$newest" != "$tag" ]; then
+            echo "::error::expected $tag to be the newest tag, found '${newest:-<none>}'"
+            exit 1
+          fi
+
+      # A tag is immutable once anyone has fetched it (RELEASING.md). Everything
+      # that can fail is checked before the release exists, never after.
+      - name: Build, vet, test as a consumer resolves it
+        run: |
+          go mod verify
+          go build ./...
+          go vet ./...
+          go test -race ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
+          govulncheck ./...
+
+      # NFR-03, IR-01: a published version carrying a dependency, or reaching
+      # net/http, cannot be taken back. ci.yml's `boundaries` job already
+      # checks this on every push; it is asserted again here because a release
+      # is the one thing this repository cannot retract by force-pushing a fix.
+      - name: Zero dependencies and no net/http still hold
+        run: |
+          if grep -qE '^\s*require' go.mod; then
+            echo "::error::releasing a module with a require line (NFR-03)"
+            exit 1
+          fi
+          if [ -f go.sum ]; then
+            echo "::error::releasing a module with a go.sum (NFR-03)"
+            exit 1
+          fi
+          if go list -deps ./... | grep -qx 'net/http'; then
+            echo "::error::releasing a module that imports net/http (IR-01)"
+            exit 1
+          fi
+
+      - name: Documentation is current
+        run: ./.github/scripts/check-docs.sh
+
+      # The changelog is generated from the real API diff, not written from
+      # memory: this documents what actually changed, not what the author
+      # meant to change.
+      #
+      # -base is passed explicitly rather than left to gorelease to infer. Left
+      # to itself it asks the proxy for this module's latest published version
+      # -- and once the proxy has indexed the tag that triggered this run, that
+      # answer is the release being published, so it would diff against itself.
+      # Reading the previous version from local tag history removes that race.
+      - name: Generate API diff
+        run: |
+          sorted=$(git tag --list 'v*' --sort=-v:refname)
+          second=$(printf '%s\n' "$sorted" | sed -n '2p')
+          base="${second:-none}"
+
+          go install golang.org/x/exp/cmd/gorelease@${{ env.GORELEASE_VERSION }}
+          set +e
+          gorelease -base="$base" > "$RUNNER_TEMP/apidiff.txt" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/apidiff.txt"
+          if [ "$status" -ne 0 ]; then
+            # gorelease's existing-versions sanity check queries the live proxy
+            # and can already see the tag that triggered this run. That refusal
+            # has one specific, matched reason and only ever follows a real diff
+            # already printed above -- most relevantly, the very first release,
+            # where "none" is not a version gorelease can compare against.
+            # Anything else -- a resolution failure, a genuine incompatible
+            # change -- still fails the release.
+            if grep -q "^Can only suggest a release version when compared against the most recent version of this major:" "$RUNNER_TEMP/apidiff.txt"; then
+              echo "::warning::gorelease could not suggest a version, per the reason above -- proceeding with the diff it produced"
+            else
+              echo "::error::gorelease exited $status comparing against $base"
+              exit "$status"
+            fi
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apidiff
+          path: ${{ runner.temp }}/apidiff.txt
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/artifacts
+
+      # A release nobody can attribute is worth less than no release.
+      # .github/allowed_signers ships empty and stays empty until a human adds
+      # their own key -- this step is the reason that omission is safe rather
+      # than an oversight nobody noticed until the first tag.
+      - name: Verify the tag is signed
+        run: |
+          if ! [ -s .github/allowed_signers ] || ! grep -qv '^#' .github/allowed_signers; then
+            echo "::error::.github/allowed_signers has no key configured -- no release can be verified"
+            echo "See RELEASING.md, 'Tagging', and the comment in .github/allowed_signers."
+            exit 1
+          fi
+          git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/allowed_signers"
+          git verify-tag '${{ github.ref_name }}'
+
+      - name: Assemble release notes
+        run: |
+          diff_file=$(find "$RUNNER_TEMP/artifacts" -type f -name apidiff.txt -print -quit)
+          # A missing or empty artifact is a broken release, not a release with
+          # no diff to report: verify already failed a non-zero gorelease, so
+          # the only way here is the upload failing -- and substituting a
+          # placeholder would let that pass as a normal release with nobody the
+          # wiser.
+          if [ ! -s "$diff_file" ]; then
+            echo "::error::apidiff.txt missing or empty -- the artifact upload must have failed"
+            exit 1
+          fi
+
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            printf '## bastion %s\n\n' '${{ github.ref_name }}'
+            printf 'Verified with `%s` at the Go %s floor (NFR-07).\n\n' \
+              '${{ needs.verify.outputs.toolchain }}' '${{ env.GO_VERSION }}'
+            printf '### API changes\n\n```\n'
+            cat "$diff_file"
+            printf '```\n\n'
+            printf 'Requirements: [REQUIREMENTS.md](REQUIREMENTS.md) — '
+            printf 'Decisions: [docs/adr](docs/adr/README.md)\n'
+          } > "$notes"
+          cat "$notes"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ github.ref_name }}' \
+            --repo '${{ github.repository }}' \
+            --title "bastion ${{ github.ref_name }}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag

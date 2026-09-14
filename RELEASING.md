@@ -74,9 +74,29 @@ reader can already get from `git log`.
 
 ## Not yet automated
 
-There is no release workflow in `.github/workflows/`, deliberately: there is
-nothing to release, and a publishing pipeline written before the first release
-is a pipeline nobody has watched succeed. It arrives with B7, and when it does
-it fails closed — `cairn`'s refused to publish a release whose module coverage
-check did not recognise a new module, which is the behaviour you want even when
-it is inconvenient.
+## The release workflow
+
+`.github/workflows/release.yml` runs on every `v*` tag push. It fails closed
+at every step it can, deliberately including the very first release:
+
+- Rebuilds, vets, tests and `govulncheck`s the tag exactly as a consumer
+  resolves it, and re-checks the zero-dependency and no-`net/http` claims
+  `ci.yml`'s `boundaries` job already checks on every push — asserted again
+  here because a release, unlike a branch, cannot be fixed by force-pushing.
+- Generates the API diff against the previous tag with `gorelease`, and
+  uploads it as an artifact the `release` job assembles into the GitHub
+  Release notes — a changelog generated from what actually changed, not
+  written from memory.
+- **Refuses to publish an unsigned tag.** `.github/allowed_signers` ships
+  empty on purpose: `git verify-tag` fails until a human adds their own SSH
+  public key there, per the comment in that file. An unsigned release is one
+  nobody can attribute, and a check that only warns gates nothing — this one
+  has not yet been watched succeed, because there has not yet been a key to
+  verify it against.
+
+This has not been seen to publish a real release. It has been checked with
+`actionlint` and each shell step's syntax verified independently, and its
+logic mirrors `cairn`'s own `release.yml` closely enough to inherit that
+one's track record — but "verified by inspection" and "watched succeed" are
+different claims, and only the second one is true once the first tag has
+actually gone through it.
