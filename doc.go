@@ -36,7 +36,11 @@
 // behind it (IR-02). [Execute] does re-raise a panic that the wrapped
 // operation itself raised, unchanged, once its own bookkeeping is complete —
 // that is propagation, not origination; see Execute's own doc comment and
-// docs/adr/0003-a-panic-always-counts-as-a-failure-and-is-re-raised.md.
+// docs/adr/0003-a-panic-always-counts-as-a-failure-and-is-re-raised.md. The
+// same is true of a panic in a hook: it can never corrupt bastion's own
+// bookkeeping or prevent op from running, and it is re-raised to Execute's
+// caller once that bookkeeping is resolved — see
+// docs/adr/0010-a-hook-panic-never-corrupts-bookkeeping.md.
 //
 // There is no global state (IR-03). A Breaker's configuration is fixed once
 // [New] returns, and two breakers in one process share nothing.

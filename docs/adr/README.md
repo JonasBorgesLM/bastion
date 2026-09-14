@@ -25,6 +25,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0007`](0007-no-dedicated-timeout-helper.md) | No dedicated timeout helper — FR-07 is satisfied by documenting the pattern | Accepted | — |
 | [`0008`](0008-fallback-is-a-post-execute-call-site-function.md) | Fallback is a post-Execute, call-site function — never nested inside op | Accepted | — |
 | [`0009`](0009-bastion-plugs-in-first-at-the-gateway.md) | bastion plugs in first at the gateway, and the two host-side rules that composition needs | Accepted | — |
+| [`0010`](0010-a-hook-panic-never-corrupts-bookkeeping.md) | A hook panic never corrupts bookkeeping; op never running is accounted like a cancelled call, not a failure | Accepted | — |
 
 ## Open questions
 
@@ -39,7 +40,11 @@ numbers. The numbers in the first column are for conversation, not for citation.
 | # | Question | Needed by |
 | --- | --- | --- |
 
-None open. See the Index above for how each of the nine was resolved.
+None open. See the Index above for how each of the nine original questions
+was resolved. [ADR-0010](0010-a-hook-panic-never-corrupts-bookkeeping.md) is
+a tenth record, not a tenth question from this table — it answers a defect
+the B9 audit found (issue #46), not a question deferred from an earlier
+phase.
 Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
 recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)

@@ -311,6 +311,19 @@ func (b *Breaker) fireStateChange(ctx context.Context, ev *StateChangeEvent) {
 	b.hooks.OnStateChange(ctx, *ev)
 }
 
+// runHookSafely calls fn, recovering any panic instead of letting it
+// propagate immediately. Every hook call site in Execute uses this, so one
+// hook's panic can never prevent bastion's own bookkeeping — or a sibling
+// hook — from running (ADR-0010). The panic value, if any, is returned so the
+// caller can decide what to do with it.
+func runHookSafely(fn func()) (panicValue any) {
+	defer func() {
+		panicValue = recover()
+	}()
+	fn()
+	return nil
+}
+
 // Execute runs op through b: admitted immediately in [StateClosed], admitted
 // as a bounded probe in [StateHalfOpen], and refused without invoking op in
 // [StateOpen] — returning [ErrOpenState] or [ErrTooManyRequests] (ADR-0001).
@@ -334,7 +347,21 @@ func (b *Breaker) fireStateChange(ctx context.Context, ev *StateChangeEvent) {
 // Hooks fire synchronously, on the calling goroutine, always after b.mu has
 // been released (FR-09, IR-02): a transition caused by admitting the call,
 // then op runs, then [Hooks.OnCall] or [Hooks.OnReject], then a transition
-// caused by the call's outcome, if any.
+// caused by the call's outcome, if any. A panic in a hook is recovered and
+// re-raised to this call's own caller only once bastion's own bookkeeping for
+// this call is fully resolved — it can never leave a Half-Open slot admitted
+// and never released, and it can never prevent op from being invoked or a
+// sibling hook from running (ADR-0010). If op itself also panics, op's panic
+// is what reaches the caller (ADR-0003's unconditional priority); a hook's
+// panic in that case is resolved but not the one re-raised.
+//
+// If a hook prevents op from ever being invoked at all — by panicking, or by
+// calling runtime.Goexit, before op is reached — that call is accounted like
+// a cancelled context: neither a failure nor a success, since the breaker has
+// no evidence about the dependency, only that its own hook broke
+// (ADR-0010). The same accounting applies if op itself calls runtime.Goexit
+// without returning: bastion cannot tell that apart from op's own panic, so
+// it is treated the same way, unconditionally, as FR-11 already treats one.
 //
 // If op is being invoked as a probe into a dependency that may still be
 // unavailable, it should itself respect ctx's deadline where one is set. A
@@ -345,64 +372,112 @@ func Execute[T any](ctx context.Context, b *Breaker, op func(context.Context) (T
 	var zero T
 
 	adm := b.admit(b.clock.Now())
-	b.fireStateChange(ctx, adm.transition)
 
 	if !adm.admitted {
+		var hookPanic any
+		capture := func(p any) {
+			if p != nil && hookPanic == nil {
+				hookPanic = p
+			}
+		}
+		capture(runHookSafely(func() { b.fireStateChange(ctx, adm.transition) }))
 		if b.hooks.OnReject != nil {
-			b.hooks.OnReject(ctx, RejectEvent{Name: b.name, State: adm.state, Reason: adm.reject})
+			capture(runHookSafely(func() {
+				b.hooks.OnReject(ctx, RejectEvent{Name: b.name, State: adm.state, Reason: adm.reject})
+			}))
+		}
+		if hookPanic != nil {
+			panic(hookPanic)
 		}
 		return zero, adm.reject
 	}
 
-	result, panicked, recovered, err := callSafely(ctx, op)
-
-	var oc outcome
-	switch {
-	case panicked:
-		// ADR-0003: unconditional, even if ctx also happens to be Done — a
-		// panic is never evidence that the caller gave up.
-		oc = outcomeFailure
-	case ctx.Err() != nil:
-		// ADR-0005: read on ctx itself, the exact value passed into Execute —
-		// never on err, which cannot tell caller cancellation apart from an
-		// operation's own internally-derived context timing out.
-		oc = outcomeCancelled
-	case b.classify(err):
-		oc = outcomeFailure
-	default:
-		oc = outcomeSuccess
-	}
-
-	completion := b.complete(b.clock.Now(), adm, oc)
-	b.fireStateChange(ctx, completion)
-
-	if b.hooks.OnCall != nil {
-		callErr := err
-		if panicked {
-			// FR-11: the caller gets the original recovered value via panic()
-			// below, unchanged. This is only what the hook sees — CallEvent.Err
-			// is typed error, and a recovered value is not one.
-			callErr = fmt.Errorf("bastion: operation panicked: %v", recovered)
+	var (
+		result      T
+		opErr       error
+		opStarted   bool // true once Execute has begun calling op
+		opRan       bool // true once op has returned normally (not via panic or Goexit)
+		opPanicked  bool
+		opRecovered any
+		hookPanic   any
+	)
+	capture := func(p any) {
+		if p != nil && hookPanic == nil {
+			hookPanic = p
 		}
-		b.hooks.OnCall(ctx, CallEvent{Name: b.name, State: adm.state, Err: callErr, Counted: oc == outcomeFailure})
 	}
 
-	if panicked {
-		panic(recovered)
-	}
-	return result, err
-}
+	func() {
+		// Registered before the admission hook or op run, so admit's mutation
+		// of shared state (incrementing halfOpenInFlight for a probe) is
+		// always matched by a complete call — on a normal return, a panic
+		// anywhere in this closure, or a runtime.Goexit anywhere in it.
+		// Defers run on Goexit; the rest of this closure's code, and
+		// everything in Execute after the call to it, does not (ADR-0010).
+		defer func() {
+			if r := recover(); r != nil {
+				if opStarted {
+					opPanicked = true
+					opRecovered = r
+				} else {
+					capture(r) // the admission hook panicked before op was ever attempted
+				}
+			}
 
-// callSafely runs op, recovering a panic instead of letting it unwind through
-// the breaker's own bookkeeping. b.mu is never involved here — this is called
-// only after admit has already released it.
-func callSafely[T any](ctx context.Context, op func(context.Context) (T, error)) (result T, panicked bool, recovered any, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panicked = true
-			recovered = r
-		}
+			var oc outcome
+			switch {
+			case !opStarted:
+				oc = outcomeCancelled
+			case opPanicked:
+				oc = outcomeFailure
+			case !opRan:
+				// op was invoked but never returned normally: it called
+				// runtime.Goexit. Treated the same as an ordinary panic
+				// (FR-11) — bastion cannot tell a caller bug from
+				// dependency-triggered corruption either way, and an
+				// operation that never completed is not evidence the
+				// dependency is healthy.
+				oc = outcomeFailure
+			case ctx.Err() != nil:
+				oc = outcomeCancelled
+			case b.classify(opErr):
+				oc = outcomeFailure
+			default:
+				oc = outcomeSuccess
+			}
+
+			completion := b.complete(b.clock.Now(), adm, oc)
+			capture(runHookSafely(func() { b.fireStateChange(ctx, completion) }))
+
+			if b.hooks.OnCall != nil {
+				callErr := opErr
+				switch {
+				case !opStarted:
+					callErr = fmt.Errorf("bastion: a hook panicked before the operation could run")
+				case opPanicked:
+					// FR-11: the caller gets the original recovered value via
+					// panic() below, unchanged. This is only what the hook
+					// sees — CallEvent.Err is typed error, and a recovered
+					// value is not one.
+					callErr = fmt.Errorf("bastion: operation panicked: %v", opRecovered)
+				}
+				capture(runHookSafely(func() {
+					b.hooks.OnCall(ctx, CallEvent{Name: b.name, State: adm.state, Err: callErr, Counted: oc == outcomeFailure})
+				}))
+			}
+		}()
+
+		b.fireStateChange(ctx, adm.transition)
+		opStarted = true
+		result, opErr = op(ctx)
+		opRan = true
 	}()
-	result, err = op(ctx)
-	return result, false, nil, err
+
+	switch {
+	case opPanicked:
+		panic(opRecovered) // ADR-0003: unconditional priority over any hook panic
+	case hookPanic != nil:
+		panic(hookPanic)
+	}
+	return result, opErr
 }
