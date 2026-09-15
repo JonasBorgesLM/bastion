@@ -31,6 +31,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0013`](0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md) | Provenance attests a reproducible source tarball, not a compiled artifact | Accepted | — |
 | [`0014`](0014-execute-gains-an-empty-call-option-slot.md) | Execute gains an empty CallOption slot; Retry and Fallback do not | Accepted | — |
 | [`0015`](0015-counts-answers-only-what-the-hook-stream-cannot.md) | Counts answers only what the hook stream cannot, and adds nothing to the hot path | Accepted | — |
+| [`0016`](0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md) | The single-mutex throughput ceiling is measured and accepted, not optimized away | Accepted | — |
 
 ## Open questions
 
@@ -50,11 +51,12 @@ was resolved. [ADR-0010](0010-a-hook-panic-never-corrupts-bookkeeping.md),
 [ADR-0011](0011-retry-skips-the-wait-after-a-breaker-rejection.md),
 [ADR-0012](0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md),
 [ADR-0013](0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md),
-[ADR-0014](0014-execute-gains-an-empty-call-option-slot.md), and
-[ADR-0015](0015-counts-answers-only-what-the-hook-stream-cannot.md)
+[ADR-0014](0014-execute-gains-an-empty-call-option-slot.md),
+[ADR-0015](0015-counts-answers-only-what-the-hook-stream-cannot.md), and
+[ADR-0016](0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md)
 are not answers to questions from this table — they answer defects and
-open items the B9/B10 audit found (issues #46, #47/#48, #49, #51, #52, and
-#53), not questions deferred from an earlier phase.
+open items the B9/B10 audit found (issues #46, #47/#48, #49, #51, #52, #53,
+and #55), not questions deferred from an earlier phase.
 Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
 recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)
