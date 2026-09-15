@@ -85,11 +85,22 @@ const overflowGuard = time.Duration(1) << 61
 // suppressed at the call site with the reasoning above, not silenced
 // globally.
 //
-// Doubling is done iteratively with a clamp at every step, rather than by
-// shifting attempt-2 bits at once, so a policy with a very large MaxAttempts
-// can never compute an overflowed or negative duration: as soon as the
-// running value would cross MaxDelay (or overflowGuard, absent a MaxDelay),
-// growth stops.
+// Doubling is done iteratively with a clamp checked immediately after every
+// step, rather than by shifting attempt-2 bits at once, so a policy with a
+// very large MaxAttempts can never compute an overflowed or negative
+// duration: as soon as the running value would cross MaxDelay (or
+// overflowGuard, absent a MaxDelay), growth stops.
+//
+// The clamp is checked right after d *= 2, not before it, and this is
+// deliberate, not a style choice: a check placed ahead of the doubling
+// instead only catches an overshoot if the loop runs at least one more
+// iteration afterward to notice it -- on the loop's *last* iteration, with
+// no further iteration left, an overshoot on that final doubling would
+// escape uncaught (found by FuzzNextDelay, retry_internal_test.go, within
+// seconds of the first real fuzzing run: nextDelay(BaseDelay=10ms,
+// attempt=40) exceeded overflowGuard while nextDelay(..., attempt=41)
+// correctly clamped back down to it -- a transient non-monotonic spike the
+// hand-picked overflow regression test below never exercised).
 func nextDelay(p RetryPolicy, attempt int) time.Duration {
 	shift := max(attempt-2, 0)
 
@@ -99,15 +110,11 @@ func nextDelay(p RetryPolicy, attempt int) time.Duration {
 			d = p.MaxDelay
 			break
 		}
-		if d > overflowGuard {
-			if p.MaxDelay > 0 {
-				d = p.MaxDelay
-			} else {
-				d = overflowGuard
-			}
+		d *= 2
+		if p.MaxDelay == 0 && d > overflowGuard {
+			d = overflowGuard
 			break
 		}
-		d *= 2
 	}
 	if p.MaxDelay > 0 && d > p.MaxDelay {
 		d = p.MaxDelay
