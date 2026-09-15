@@ -43,6 +43,16 @@ to look for.
   the response mapping and rate-limit interaction described in
   [`REQUIREMENTS.md`](REQUIREMENTS.md) §5.1 — those are the host's code. Report
   those to the service that owns them.
+- **The one exception to "holds no secret":** if a guarded operation panics,
+  [`Hooks.OnCall`](hooks.go)'s `CallEvent.Err` carries a `fmt.Errorf("%v",
+  ...)` of the panic value (ADR-0003) — whatever that value is, a struct, a
+  request object, anything with a `String` method that renders more than
+  intended. That value comes from the host's own operation, not from bastion,
+  and a host's own `recover` would see the same thing; bastion neither adds to
+  it nor redacts it. A host wiring `OnCall` into a log sink is the one place a
+  caller value crosses into a log line via this library, and should treat
+  `Err` accordingly on that specific path — nowhere else in bastion's own
+  output does this apply.
 
 ## Supported versions
 

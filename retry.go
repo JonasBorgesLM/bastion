@@ -123,6 +123,16 @@ func nextDelay(p RetryPolicy, attempt int) time.Duration {
 // first. A zero or negative d still checks ctx once rather than skipping the
 // wait unconditionally: a context already done when a retry attempt finishes
 // must stop the loop even when there is nothing left to wait out.
+//
+// This is the one place in the package that waits for real time to pass, and
+// it does so with time.NewTimer directly, never through a [Clock] — Retry
+// takes no Clock at all, unlike [Breaker]. Clock exists so a state
+// transition's *decision* (has this timeout elapsed) can be tested without
+// the wall clock; a real wait here still has to actually wait, on whatever
+// clock the runtime's timer uses, so substituting one would let a test skip
+// the wait without proving Retry actually waits. See [Clock]'s own godoc,
+// "This interface cannot grow a second method," for the other half of why
+// this asymmetry is deliberate rather than an oversight.
 func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		select {

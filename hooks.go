@@ -28,7 +28,9 @@ type Hooks struct {
 	OnStateChange func(ctx context.Context, ev StateChangeEvent)
 
 	// OnCall fires after a call the breaker admitted has completed, whether
-	// it succeeded or failed.
+	// it succeeded or failed. If op panicked, ev.Err carries a stringified
+	// form of the panic value, not the value itself — see [CallEvent.Err]
+	// before wiring this into a log sink.
 	OnCall func(ctx context.Context, ev CallEvent)
 
 	// OnReject fires when the breaker refuses a call without invoking it,
@@ -65,6 +67,16 @@ type CallEvent struct {
 	// Err is the error the operation returned, nil on success. It is the raw
 	// error, before classification (FR-04) — a handler that wants to know how
 	// the breaker counted it should read Counted.
+	//
+	// If op panicked, Err is not that panic's value — it is a fmt.Errorf
+	// wrapping "%v" of it (ADR-0003), because a panic value is not always an
+	// error and OnCall needs one either way. This means whatever op panicked
+	// with — a struct, a request object, anything with a String method that
+	// renders more than intended — is stringified into this field. That value
+	// came from the host's own code, and the host's own recover would see the
+	// same thing; bastion neither adds to it nor redacts it. A handler wiring
+	// OnCall into a log sink should know this before deciding what that sink
+	// does with Err — see SECURITY.md's "Scope" section.
 	Err error
 
 	// Counted reports whether this call moved the failure counters. An error
