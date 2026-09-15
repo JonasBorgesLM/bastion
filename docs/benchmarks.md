@@ -1,10 +1,11 @@
 # Benchmarks
 
-Issue #28. `go test -bench` output, Apple M1, `go1.27.1`, recorded
-2026-09-13. Re-run with `go test . -bench=. -benchmem -run '^$'` to
+Issue #28 (serial numbers) and issue #55 (parallel numbers, added
+2026-09-15, ADR-0016). `go test -bench` output, Apple M1, `go1.27.1`.
+Re-run with `go test . -bench=. -benchmem -run '^$' -cpu 1,2,4,8` to
 reproduce; absolute numbers will vary by machine — what matters is the
-*shape*: the delta between the baseline and each breaker path, and that
-neither path allocates.
+*shape*: the delta between the baseline and each breaker path, that neither
+path allocates, and how each path's cost changes as core count rises.
 
 ## The three paths
 
@@ -44,11 +45,58 @@ result. A resilience library sitting in front of every guarded call is
 exactly the place where an allocation per call would compound; this
 benchmark is the check that it does not.
 
+## The same two paths, under real contention
+
+```
+BenchmarkExecute_ClosedHappyPathParallel       111.0 ns/op   (1 core)
+BenchmarkExecute_ClosedHappyPathParallel-2     104.1 ns/op   (2 cores)
+BenchmarkExecute_ClosedHappyPathParallel-4     150.1 ns/op   (4 cores)
+BenchmarkExecute_ClosedHappyPathParallel-8     218.5 ns/op   (8 cores)  <- 2.0x slower than 1 core
+
+BenchmarkExecute_OpenRejectionPathParallel      34.6 ns/op   (1 core)
+BenchmarkExecute_OpenRejectionPathParallel-2    65.6 ns/op   (2 cores)
+BenchmarkExecute_OpenRejectionPathParallel-4    98.7 ns/op   (4 cores)
+BenchmarkExecute_OpenRejectionPathParallel-8   117.9 ns/op   (8 cores)  <- 3.4x slower than 1 core
+```
+
+Every `Execute` takes `b.mu` twice, and it is shared by every goroutine
+calling through one `Breaker`. `b.RunParallel` is what actually exercises
+that: the plain benchmarks above run one goroutine regardless of `-cpu`, so
+they report a flat number across core counts and cannot show contention at
+all — this is why both shapes exist in this file, not just the parallel
+one. Adding cores costs throughput per call here, on both paths, worse in
+relative terms on the rejection path. That signature — throughput falling as
+concurrency rises — is lock contention plus cache-line traffic on the shared
+`Breaker`, not the cost of the work itself, which allocates nothing and is a
+handful of comparisons.
+
+**Read this number as a worst case, not a representative one.** `b.mu` is
+held only for `admit` and `complete`'s own bookkeeping, never while `op`
+runs (FR-11) — the benchmark's `op` returns instantly, so every goroutine
+spends essentially all its time either inside the ~100–200ns critical
+section or waiting for it, with nothing spacing acquisitions apart. A real
+`op` is the dependency call this library exists to guard: microseconds at
+best, commonly milliseconds, during which `b.mu` sits idle for other
+goroutines to use. Even at this benchmark's adversarial 8-core number, the
+absolute cost — ~220ns for the happy path, ~120ns for a rejection — remains
+three to four orders of magnitude below what any real dependency call costs.
+This is why [ADR-0016](adr/0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md)
+accepts the ceiling rather than spending the state machine's single-critical-
+section correctness guarantee to move it.
+
 ## What to compare a later change against
 
-Rerun this file's three benchmarks and compare `ns/op` and `allocs/op`
-against the numbers above. `allocs/op` going from 0 to anything non-zero on
-either `Execute` benchmark is the more important signal — a hot-path
-allocation is a regression worth blocking on, independent of what a
-`benchstat` comparison says about the absolute timing, which is expected to
-drift with the machine that runs it.
+Rerun this file's benchmarks and compare `ns/op` and `allocs/op` against the
+numbers above, across `-cpu 1,2,4,8` for the two `Parallel` benchmarks.
+`allocs/op` going from 0 to anything non-zero on any `Execute` benchmark is
+the more important signal — a hot-path allocation is a regression worth
+blocking on, independent of what a `benchstat` comparison says about the
+absolute timing, which is expected to drift with the machine that runs it. A
+parallel number moving further from its serial counterpart than the ratios
+above is worth investigating before assuming it is only machine noise.
+
+This is not only manual discipline: `ci.yml`'s `benchmarks` job runs every
+benchmark on every push and pull request and fails if any of the `Execute`
+or `Do` benchmarks reports anything but `0 allocs/op` (issue #59) — the one
+number in this file that does not drift with the runner, so it is the one
+CI actually gates on.

@@ -1,6 +1,9 @@
 package bastion
 
 import (
+	"errors"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -135,5 +138,103 @@ func TestNextDelay_OverflowGuardYieldsToAnExplicitMaxDelay(t *testing.T) {
 	p := RetryPolicy{BaseDelay: time.Millisecond, MaxDelay: overflowGuard * 2}
 	if got := nextDelay(p, 1000); got != p.MaxDelay {
 		t.Fatalf("nextDelay(attempt=1000) = %s, want exactly MaxDelay (%s)", got, p.MaxDelay)
+	}
+}
+
+// FuzzNextDelay covers the input space the overflow regression test above
+// found by hand (issue #59): four caller-controlled numbers, invariants easy
+// to state and easy to break. Seeded from the table-driven cases above.
+//
+// Inputs are constrained to what RetryPolicy.validate would accept -- the
+// only shape nextDelay is ever actually called with, from Retry's own loop
+// -- rather than fuzzed as arbitrary values validate already rejects
+// elsewhere. This keeps every invariant below meaningful for the real
+// calling contract instead of asserting something about states nextDelay
+// can never actually be called in.
+//
+// This is how nextDelay's overflow-clamp fix earned its own negative
+// control, not a hand-mutated one: the very first real 30s fuzzing run
+// found seed 8dfa42327e276ab3 (now saved in testdata/fuzz/FuzzNextDelay/)
+// failing against nextDelay as it stood before that fix -- BaseDelay=10ms,
+// attempt 40 exceeding overflowGuard while attempt 41 clamped back down to
+// it, a transient non-monotonic spike (see nextDelay's own doc comment for
+// why). Confirmed failing against the pre-fix shape, confirmed passing
+// after, and this seed now replays on every ordinary `go test` run
+// regardless of -fuzz, so that specific defect can never silently return.
+func FuzzNextDelay(f *testing.F) {
+	f.Add(int64(10*time.Millisecond), int64(0), 0.0, 2)
+	f.Add(int64(10*time.Millisecond), int64(35*time.Millisecond), 0.0, 4)
+	f.Add(int64(100*time.Millisecond), int64(0), 0.5, 2)
+	f.Add(int64(10*time.Millisecond), int64(15*time.Millisecond), 1.0, 5)
+	f.Add(int64(time.Millisecond), int64(0), 0.0, 1000)
+	f.Add(int64(time.Millisecond), int64(0), 0.0, 1) // shift == 0, the loop body never runs
+
+	f.Fuzz(func(t *testing.T, baseDelayNs, maxDelayNs int64, jitter float64, attempt int) {
+		switch {
+		case baseDelayNs < 0, maxDelayNs < 0, attempt < 1:
+			t.Skip()
+		case maxDelayNs > 0 && maxDelayNs < baseDelayNs:
+			t.Skip()
+		case jitter < 0 || jitter > 1 || math.IsNaN(jitter):
+			t.Skip()
+		}
+
+		p := RetryPolicy{
+			BaseDelay: time.Duration(baseDelayNs),
+			MaxDelay:  time.Duration(maxDelayNs),
+			Jitter:    jitter,
+		}
+		got := nextDelay(p, attempt)
+
+		if got < 0 {
+			t.Fatalf("nextDelay(%+v, %d) = %s, want never negative", p, attempt, got)
+		}
+		if p.MaxDelay > 0 && got > p.MaxDelay {
+			t.Fatalf("nextDelay(%+v, %d) = %s, want at most MaxDelay %s", p, attempt, got, p.MaxDelay)
+		}
+
+		if p.Jitter == 0 {
+			// Deterministic: the jitter draw is the only non-pure part of
+			// nextDelay, so with it switched off, calling again must
+			// reproduce exactly.
+			if got2 := nextDelay(p, attempt); got2 != got {
+				t.Fatalf("nextDelay(%+v, %d) is not deterministic with Jitter=0: %s vs %s", p, attempt, got, got2)
+			}
+			// Monotonically non-decreasing in attempt until the cap. Jitter
+			// randomizes each draw independently, so this is only checkable
+			// with it off -- a later attempt's smaller random reduction
+			// could otherwise make a strictly-growing schedule look like it
+			// went backwards without the growth itself being wrong.
+			if attempt < math.MaxInt {
+				if next := nextDelay(p, attempt+1); next < got {
+					t.Fatalf("nextDelay(%+v, %d) = %s > nextDelay(%+v, %d) = %s, want non-decreasing", p, attempt, got, p, attempt+1, next)
+				}
+			}
+		}
+	})
+}
+
+// ADR-0011: defaultIsRetriable, tested directly since it is unexported and
+// has no other observable surface than the behavior Retry's own black-box
+// tests already exercise end to end.
+func TestDefaultIsRetriable(t *testing.T) {
+	ordinary := errors.New("boom")
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"an ordinary error is retriable", ordinary, true},
+		{"ErrOpenState is not retriable", ErrOpenState, false},
+		{"ErrTooManyRequests is not retriable", ErrTooManyRequests, false},
+		{"a wrapped ErrOpenState is not retriable", fmt.Errorf("wrapped: %w", ErrOpenState), false},
+		{"a wrapped ErrTooManyRequests is not retriable", fmt.Errorf("wrapped: %w", ErrTooManyRequests), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := defaultIsRetriable(tt.err); got != tt.want {
+				t.Errorf("defaultIsRetriable(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

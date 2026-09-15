@@ -15,9 +15,12 @@ updates:
     commit-message:
       prefix: "deps:"
 
-  # The workflow files themselves. Actions are pinned by major version in
-  # ci.yml; this keeps that pin from going stale, and an action update is a
-  # supply-chain change that deserves the same review as a code dependency.
+  # The workflow files themselves. Actions are pinned by commit SHA in ci.yml
+  # and release.yml (issue #50); this is what keeps those pins from going
+  # stale rather than becoming a supply-chain check nobody ever bumps again --
+  # Dependabot updates both the SHA and its trailing version comment. An
+  # action update is a supply-chain change that deserves the same review as a
+  # code dependency.
   - package-ecosystem: github-actions
     directory: /
     schedule:

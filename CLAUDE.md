@@ -62,6 +62,8 @@ writing code, know which jobs will have an opinion:
 | --- | --- |
 | `build & test` | build, vet, or `go test -race` fails |
 | `boundaries` | `go.mod` gains a require, a `go.sum` appears, or anything reaches `net/http` |
+| `fuzz` | `FuzzNextDelay`'s corpus (`testdata/fuzz/`) regresses in a 30s run |
+| `benchmarks` | any `Execute`/`Do` benchmark reports non-zero `allocs/op` |
 | `lint` | an exported identifier has no doc comment, a `switch` over `State` misses a case, among much else |
 | `govulncheck` | a standard-library vulnerability is reachable from this code |
 | `docs` | a cited `FR-`/`NFR-`/`IR-` id does not exist, or a relative link is broken |
@@ -126,6 +128,13 @@ Decided, not open. Each is a defect if violated.
     compose at the host. `cairn` depends on `moat` for `secret.Value`; bastion
     holds nothing that needs redacting, and taking the dependency would put
     `moat` in the `go.sum` of everyone who wanted only a circuit breaker.
+11. **A hook panic never corrupts bastion's own bookkeeping** (ADR-0010).
+    Every hook call site is wrapped so a panic there is recovered, resolved,
+    and re-raised only after `complete` has run — it can never leave a
+    Half-Open slot admitted and never released the way an unguarded hook call
+    once did (issue #46). This includes `runtime.Goexit` in either a hook or
+    `op`: the completion logic is registered as a `defer` ahead of both, so it
+    runs even when nothing downstream of it ever gets to.
 
 ## Conventions
 
@@ -191,6 +200,16 @@ Written down so they are avoided rather than rediscovered:
 - **The state read that does not re-evaluate.** Reporting `Open` for a circuit
   whose timeout has expired is wrong in exactly the place an operator is
   looking: the dashboard.
+- **The hook call with no recover around it.** An observability callback that
+  panics after `admit` has already mutated shared state — before `complete`
+  runs to resolve it — leaks that state forever. Found in v0.1.0 (issue #46):
+  a panicking `OnStateChange` handler left a Half-Open slot admitted and
+  never released, so the circuit rejected every *healthy* call from every
+  *other* caller for a full `openTimeout`. A bug in the host's metrics
+  callback became an outage for a dependency that was never actually
+  unhealthy. Fixed in ADR-0010 by registering completion as a `defer` ahead
+  of every hook call, not as code that assumes the call before it returned
+  normally.
 
 ## Tooling, and where it helps here
 

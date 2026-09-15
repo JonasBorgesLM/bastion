@@ -11,6 +11,12 @@
 # hands whoever controls that tool's repository code execution in this pipeline.
 # In a library whose dependency surface is a stated property, that would be
 # indefensible.
+#
+# The rule covers the actions that run those tools too, not just the tools
+# themselves. Every `uses:` below is a full commit SHA with the human-readable
+# version in a trailing comment -- a major tag like `@v7` is mutable, and
+# whoever controls that action's repository can move it (issue #50).
+# .github/dependabot.yml keeps these SHAs from going stale.
 name: CI
 
 on:
@@ -57,9 +63,9 @@ jobs:
     name: build & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.mod
@@ -85,7 +91,7 @@ jobs:
           fi
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
           path: coverage.out
@@ -101,8 +107,8 @@ jobs:
     name: zero dependencies, and no net/http
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.mod
@@ -140,13 +146,71 @@ jobs:
           fi
           echo "net/http is not in the dependency graph"
 
+  # --------------------------------------------------------------- fuzz ----
+  #
+  # Short by design (issue #59, moat's own targets run 30s each): this is a
+  # regression gate on every push, not a from-scratch search -- the corpus
+  # in testdata/fuzz/ already carries every input a longer run has ever
+  # found interesting, FuzzNextDelay's overflow case included, and replays
+  # it every time regardless of -fuzztime.
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.mod
+
+      - name: go test -fuzz
+        run: go test -run '^$' -fuzz '^FuzzNextDelay$' -fuzztime 30s .
+
+  # ---------------------------------------------------------- benchmarks ----
+  #
+  # docs/benchmarks.md records numbers a later change is compared against;
+  # this is what actually does the comparing, on the one signal that
+  # doesn't drift with the runner (issue #59): allocs/op. Timing varies by
+  # machine and by neighbor noise on a shared runner, so this job does not
+  # gate on ns/op -- only on an allocation appearing where the file records
+  # zero.
+  benchmarks:
+    name: benchmarks (0 allocs/op on the hot path)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.mod
+
+      - name: go test -bench
+        run: go test . -bench=. -benchmem -run '^$' | tee bench.txt
+
+      - name: Every Execute/Do benchmark must report 0 allocs/op
+        run: |
+          fail=0
+          for name in \
+            BenchmarkExecute_ClosedHappyPath \
+            BenchmarkExecute_OpenRejectionPath \
+            BenchmarkExecute_ClosedHappyPathParallel \
+            BenchmarkExecute_OpenRejectionPathParallel \
+            BenchmarkOpDirect
+          do
+            if ! grep -E "^${name}(-[0-9]+)?[[:space:]].*[[:space:]]0 allocs/op\$" bench.txt > /dev/null; then
+              echo "::error::${name} did not report exactly 0 allocs/op -- a hot-path allocation regression, or the benchmark name changed and this check needs updating"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
   # --------------------------------------------------------------- lint ----
   lint:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.LINT_GO_VERSION }}
           cache-dependency-path: go.mod
@@ -162,7 +226,7 @@ jobs:
 
       # v9 of the action is the line that runs golangci-lint v2; earlier majors
       # install v1, which rejects .golangci.yml's `version: "2"` schema.
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: ${{ env.LINT_VERSION }}
 
@@ -179,8 +243,8 @@ jobs:
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Deliberately not GO_VERSION -- see the comment on it above.
           go-version: ${{ env.GO_SUPPORTED_VERSION }}
@@ -199,8 +263,8 @@ jobs:
     name: documentation is current
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.mod
@@ -219,7 +283,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -258,7 +322,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -333,8 +397,8 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/dependency-review-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           # A new dependency in this repository is a design decision, so
           # anything with a known vulnerability at any severity fails rather
@@ -355,6 +419,8 @@ jobs:
     needs:
       - build
       - boundaries
+      - fuzz
+      - benchmarks
       - lint
       - govulncheck
       - docs

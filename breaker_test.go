@@ -3,6 +3,7 @@ package bastion_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -388,6 +389,321 @@ func TestExecute_PanicReleasesTheLockAndLeavesTheBreakerUsable(t *testing.T) {
 	}
 }
 
+// ADR-0010, issue #46: reproduces the reported defect directly. An
+// OnStateChange handler that panics on the Closed->HalfOpen transition used
+// to leave halfOpenInFlight incremented forever, since complete (which would
+// have released it) was never reached -- every later call, from every other
+// caller, got ErrTooManyRequests until ADR-0004's staleness lease expired.
+//
+// Negative control: verified failing (State() == Open, the pre-fix leaked
+// shape, and the follow-up Execute() returning ErrTooManyRequests) against
+// the pre-ADR-0010 Execute, which called b.fireStateChange(ctx,
+// adm.transition) unguarded and let its panic abort Execute before complete
+// ever ran.
+func TestExecute_AdmissionHookPanicDoesNotLeakTheProbeSlot(t *testing.T) {
+	clock := newFakeClock()
+	panicOnTransition := false
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithHalfOpenMaxCalls(1),
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnStateChange: func(_ context.Context, ev bastion.StateChangeEvent) {
+				if panicOnTransition && ev.To == bastion.StateHalfOpen {
+					panic("hook exploded")
+				}
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	clock.Advance(10 * time.Second)
+
+	panicOnTransition = true
+	opRan := false
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+			opRan = true
+			return 42, nil
+		})
+	}()
+	panicOnTransition = false
+
+	if opRan {
+		t.Fatal("op ran despite the admission hook panicking before it -- ADR-0010 says it must not")
+	}
+	if got := b.State(); got != bastion.StateHalfOpen {
+		t.Fatalf("State() after the admission hook panicked = %v, want %v (window left undecided, slot freed)", got, bastion.StateHalfOpen)
+	}
+	if _, err := bastion.Execute(context.Background(), b, succeedingOp); err != nil {
+		t.Fatalf("Execute() after the panicking hook = %v, want nil (a fresh probe must still be admitted, not ErrTooManyRequests)", err)
+	}
+}
+
+// ADR-0010: the admission hook's panic is re-raised to Execute's own caller,
+// after bookkeeping is resolved -- a hook bug is exactly as visible as an op
+// bug (ADR-0003), never silently swallowed.
+func TestExecute_AdmissionHookPanicIsReRaisedToTheCaller(t *testing.T) {
+	clock := newFakeClock()
+	panicOnTransition := false
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnStateChange: func(_ context.Context, ev bastion.StateChangeEvent) {
+				if panicOnTransition && ev.To == bastion.StateHalfOpen {
+					panic("hook exploded")
+				}
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	clock.Advance(10 * time.Second)
+	panicOnTransition = true
+
+	defer func() {
+		r := recover()
+		if r != "hook exploded" {
+			t.Fatalf("recovered = %v, want the hook's own panic value %q", r, "hook exploded")
+		}
+	}()
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp)
+	t.Fatal("Execute returned normally; want it to re-panic with the hook's value")
+}
+
+// ADR-0010: if op itself also panics, op's panic is what reaches the
+// caller -- ADR-0003's unconditional priority is unchanged by this fix.
+func TestExecute_OpPanicTakesPriorityOverACompletionHookPanic(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnCall: func(context.Context, bastion.CallEvent) {
+				panic("hook also exploded")
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	defer func() {
+		r := recover()
+		if r != "op exploded" {
+			t.Fatalf("recovered = %v, want the operation's own panic value %q (ADR-0003's priority over a hook panic)", r, "op exploded")
+		}
+	}()
+	_, _ = bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+		panic("op exploded")
+	})
+	t.Fatal("Execute returned normally; want it to re-panic")
+}
+
+// ADR-0010: a panic in a completion-stage hook (OnCall, here) is re-raised
+// only after bookkeeping has already happened -- FailureThreshold(1) must
+// have opened the circuit before the panic reaches this test.
+func TestExecute_CompletionHookPanicIsReRaisedAfterBookkeeping(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnCall: func(context.Context, bastion.CallEvent) {
+				panic("OnCall exploded")
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	defer func() {
+		r := recover()
+		if r != "OnCall exploded" {
+			t.Fatalf("recovered = %v, want the hook's own panic value", r)
+		}
+		if got := b.State(); got != bastion.StateOpen {
+			t.Fatalf("State() after the panicking OnCall hook = %v, want %v (bookkeeping must complete before the panic reaches the caller)", got, bastion.StateOpen)
+		}
+	}()
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	t.Fatal("Execute returned normally; want it to re-panic with the hook's value")
+}
+
+// A panicking OnReject is re-raised too, for the rejection path -- there is
+// no bookkeeping to protect there (a rejection resolves entirely inside
+// admit), but the hook's own bug must still surface, consistently with every
+// other hook call site.
+func TestExecute_OnRejectPanicIsReRaised(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnReject: func(context.Context, bastion.RejectEvent) {
+				panic("OnReject exploded")
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp) // opens the circuit
+
+	defer func() {
+		r := recover()
+		if r != "OnReject exploded" {
+			t.Fatalf("recovered = %v, want the hook's own panic value", r)
+		}
+	}()
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp) // rejected; OnReject panics
+	t.Fatal("Execute returned normally; want it to re-panic with the hook's value")
+}
+
+// ADR-0010: OnCall's Err names specifically that a hook prevented the
+// operation from running, distinguishing this case from an excused error or
+// a cancelled context, both of which also report Counted=false.
+func TestExecute_OnCallCarriesASpecificErrorWhenAHookPreventsOpFromRunning(t *testing.T) {
+	clock := newFakeClock()
+	panicOnTransition := false
+	var calls []bastion.CallEvent
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithHalfOpenMaxCalls(1),
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnStateChange: func(_ context.Context, ev bastion.StateChangeEvent) {
+				if panicOnTransition && ev.To == bastion.StateHalfOpen {
+					panic("boom")
+				}
+			},
+			OnCall: func(_ context.Context, ev bastion.CallEvent) {
+				calls = append(calls, ev)
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp) // fires its own OnCall; not what this test is about
+	clock.Advance(10 * time.Second)
+	calls = nil
+
+	panicOnTransition = true
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = bastion.Execute(context.Background(), b, succeedingOp)
+	}()
+	panicOnTransition = false
+
+	if len(calls) != 1 {
+		t.Fatalf("got %d OnCall events, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].Err == nil || calls[0].Counted {
+		t.Fatalf("call event = %+v, want a non-nil Err and Counted=false", calls[0])
+	}
+}
+
+// ADR-0010: op calling runtime.Goexit (e.g. t.Fatal misused inside an
+// operation closure) is accounted the same as an ordinary panic in op --
+// unconditionally a failure -- and does not leak the probe slot either,
+// verified from a second Execute call after the goroutine that ran the first
+// one has terminated.
+func TestExecute_OpGoexitIsAccountedAsFailureAndDoesNotLeakTheSlot(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithHalfOpenMaxCalls(1),
+		bastion.WithClock(clock),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	clock.Advance(10 * time.Second)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+			runtime.Goexit()
+			return 42, nil // unreachable
+		})
+	}()
+	<-done
+
+	if got := b.State(); got != bastion.StateOpen {
+		t.Fatalf("State() after op called Goexit = %v, want %v (treated as a failure)", got, bastion.StateOpen)
+	}
+
+	clock.Advance(10 * time.Second)
+	if _, err := bastion.Execute(context.Background(), b, succeedingOp); err != nil {
+		t.Fatalf("Execute() after the Goexit-caused Open = %v, want nil (a fresh probe is admitted normally, slot not leaked)", err)
+	}
+}
+
+// ADR-0010: the admission hook calling runtime.Goexit is a harder case than
+// it panicking, since nothing lets Execute's caller "resume" after a
+// Goexit -- the calling goroutine simply terminates once its defers run. What
+// bastion still guarantees is that its OWN shared state does not leak: a
+// later call, from a different goroutine, must not be stuck behind the
+// window this Goexit interrupted.
+func TestExecute_AdmissionHookGoexitDoesNotLeakTheSlot(t *testing.T) {
+	clock := newFakeClock()
+	goexitOnTransition := false
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithHalfOpenMaxCalls(1),
+		bastion.WithClock(clock),
+		bastion.WithHooks(bastion.Hooks{
+			OnStateChange: func(_ context.Context, ev bastion.StateChangeEvent) {
+				if goexitOnTransition && ev.To == bastion.StateHalfOpen {
+					runtime.Goexit()
+				}
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	clock.Advance(10 * time.Second)
+
+	goexitOnTransition = true
+	opRan := false
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+			opRan = true
+			return 42, nil
+		})
+	}()
+	<-done
+	goexitOnTransition = false
+
+	if opRan {
+		t.Fatal("op ran despite the admission hook calling Goexit before it")
+	}
+	if got := b.State(); got != bastion.StateHalfOpen {
+		t.Fatalf("State() after the admission hook's Goexit = %v, want %v (window undecided, slot freed, not leaked)", got, bastion.StateHalfOpen)
+	}
+	if _, err := bastion.Execute(context.Background(), b, succeedingOp); err != nil {
+		t.Fatalf("Execute() after the Goexit = %v, want nil (a fresh probe is still admitted)", err)
+	}
+}
+
 // FR-09, IR-02: OnStateChange fires synchronously with the transition, and
 // carries the breaker's Name so one handler can serve every breaker in a
 // process.
@@ -699,6 +1015,14 @@ func TestExecute_ConcurrentStateReadsDuringATransition(t *testing.T) {
 // admitted (the real operation invoked, a nil error), and the remaining 17
 // must be rejected with ErrTooManyRequests without the operation running at
 // all.
+// No wall-clock sleep: an admitted probe's op blocks on release, held open
+// deterministically until every rejection has landed, rather than for a
+// fixed duration hoped to outlast scheduling on a loaded runner (issue #59).
+// A rejected call returns almost immediately -- no op call, no blocking --
+// so once exactly goroutines-3 rejections have arrived, admission for all
+// goroutines is already fully decided: WithHalfOpenMaxCalls(3) is a fixed
+// pool, so by elimination the remaining 3 are the ones currently blocked
+// inside op, and nothing can free a slot early to admit a 4th.
 func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 	clock := newFakeClock()
 	b, err := bastion.New("dep",
@@ -714,8 +1038,12 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 	clock.Advance(10 * time.Second)
 
 	const goroutines = 20
+	const wantRejected = goroutines - 3
+
 	var realOpInvocations, admitted, rejected int64
 	start := make(chan struct{})
+	release := make(chan struct{})
+	rejections := make(chan struct{}, goroutines)
 	var wg sync.WaitGroup
 	for range goroutines {
 		wg.Add(1)
@@ -724,7 +1052,7 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 			<-start
 			_, err := bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
 				atomic.AddInt64(&realOpInvocations, 1)
-				time.Sleep(30 * time.Millisecond)
+				<-release
 				return 42, nil
 			})
 			switch {
@@ -732,12 +1060,23 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 				atomic.AddInt64(&admitted, 1)
 			case errors.Is(err, bastion.ErrTooManyRequests):
 				atomic.AddInt64(&rejected, 1)
+				rejections <- struct{}{}
 			default:
 				t.Errorf("Execute() error = %v, want nil or a match for ErrTooManyRequests", err)
 			}
 		}()
 	}
 	close(start)
+
+	timeout := time.After(5 * time.Second)
+	for range wantRejected {
+		select {
+		case <-rejections:
+		case <-timeout:
+			t.Fatal("timed out waiting for the expected rejections -- admission may be admitting more than WithHalfOpenMaxCalls")
+		}
+	}
+	close(release)
 	wg.Wait()
 
 	if got := atomic.LoadInt64(&realOpInvocations); got != 3 {
@@ -746,10 +1085,143 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 	if got := atomic.LoadInt64(&admitted); got != 3 {
 		t.Fatalf("%d goroutines were admitted, want exactly 3", got)
 	}
-	if got := atomic.LoadInt64(&rejected); got != goroutines-3 {
-		t.Fatalf("%d goroutines were rejected, want exactly %d", got, goroutines-3)
+	if got := atomic.LoadInt64(&rejected); got != wantRejected {
+		t.Fatalf("%d goroutines were rejected, want exactly %d", got, wantRejected)
 	}
 	if got := b.State(); got != bastion.StateClosed {
 		t.Fatalf("State() after a successful probe resolved the window = %v, want %v", got, bastion.StateClosed)
+	}
+}
+
+// ADR-0014: Execute's variadic CallOption parameter must not change behavior
+// for a call that passes none, which is every call site in this file and
+// every call site today -- the entire rest of this suite already proves this
+// by continuing to compile and pass unmodified against the new signature,
+// but this test pins the claim explicitly rather than leaving it implicit.
+func TestExecute_CallableWithoutAnyCallOptions(t *testing.T) {
+	b, err := bastion.New("dep")
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	got, err := bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+		return 42, nil
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want nil", err)
+	}
+	if got != 42 {
+		t.Fatalf("Execute() = %d, want 42", got)
+	}
+}
+
+// ADR-0015: a fresh breaker's Counts must reflect exactly what New was
+// given, before any call.
+func TestCounts_ReflectsAFreshBreaker(t *testing.T) {
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(3))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	c := b.Counts()
+	if c.State != bastion.StateClosed {
+		t.Fatalf("Counts().State = %v, want %v", c.State, bastion.StateClosed)
+	}
+	if c.ConsecutiveFailures != 0 {
+		t.Fatalf("Counts().ConsecutiveFailures = %d, want 0", c.ConsecutiveFailures)
+	}
+	if c.FailureThreshold != 3 {
+		t.Fatalf("Counts().FailureThreshold = %d, want 3 (WithFailureThreshold)", c.FailureThreshold)
+	}
+	if !c.OpenedAt.IsZero() {
+		t.Fatalf("Counts().OpenedAt = %v, want the zero value (never Open)", c.OpenedAt)
+	}
+}
+
+// ConsecutiveFailures must track real failures one for one, and reset to
+// zero on a success -- the same rule FR-02 already applies to the internal
+// counter, now observable through Counts.
+func TestCounts_ConsecutiveFailuresTracksFailuresAndResetsOnSuccess(t *testing.T) {
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(5))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	if got := b.Counts().ConsecutiveFailures; got != 2 {
+		t.Fatalf("Counts().ConsecutiveFailures after 2 failures = %d, want 2", got)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp)
+	if got := b.Counts().ConsecutiveFailures; got != 0 {
+		t.Fatalf("Counts().ConsecutiveFailures after a success = %d, want 0", got)
+	}
+}
+
+// ADR-0015's documented contract: ConsecutiveFailures is zero unless State
+// is StateClosed, and OpenedAt is zero unless State is StateOpen -- neither
+// field leaks a stale value from a state the breaker has since left.
+//
+// Negative control: verified failing (OpenedAt non-zero while HalfOpen)
+// against a version of Counts that returned b.openedAt unconditionally
+// instead of only when eff == StateOpen.
+func TestCounts_ZeroesConsecutiveFailuresAndOpenedAtOutsideTheirStates(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithClock(clock),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	opened := b.Counts()
+	if opened.State != bastion.StateOpen {
+		t.Fatalf("Counts().State after tripping = %v, want %v", opened.State, bastion.StateOpen)
+	}
+	if opened.ConsecutiveFailures != 0 {
+		t.Fatalf("Counts().ConsecutiveFailures while Open = %d, want 0 (only meaningful while Closed)", opened.ConsecutiveFailures)
+	}
+	if opened.OpenedAt.IsZero() {
+		t.Fatal("Counts().OpenedAt while Open must not be the zero value")
+	}
+
+	clock.Advance(10 * time.Second) // openTimeout elapses; no call has happened yet
+	halfOpen := b.Counts()
+	if halfOpen.State != bastion.StateHalfOpen {
+		t.Fatalf("Counts().State after openTimeout elapsed = %v, want %v (computed live, like State())", halfOpen.State, bastion.StateHalfOpen)
+	}
+	if !halfOpen.OpenedAt.IsZero() {
+		t.Fatalf("Counts().OpenedAt while HalfOpen = %v, want the zero value -- must not leak the stale Open-episode time", halfOpen.OpenedAt)
+	}
+}
+
+// A returned Counts is a snapshot, not a live view: taking one and then
+// changing the breaker's real state must leave the earlier value untouched.
+func TestCounts_IsAnIndependentSnapshotNotALiveView(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(1), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	before := b.Counts()
+
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp) // rejected; Open unaffected by this alone
+	clock.Advance(30 * time.Second)
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp) // probe succeeds; closes the circuit
+
+	if b.Counts().State != bastion.StateClosed {
+		t.Fatalf("Counts().State after the probe succeeded = %v, want %v", b.Counts().State, bastion.StateClosed)
+	}
+	if before.State != bastion.StateOpen {
+		t.Fatalf("the earlier snapshot's State changed to %v after later calls, want it to stay %v", before.State, bastion.StateOpen)
+	}
+	if before.OpenedAt.IsZero() {
+		t.Fatal("the earlier snapshot's OpenedAt changed after later calls, want it to stay non-zero")
 	}
 }

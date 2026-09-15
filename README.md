@@ -135,6 +135,24 @@ value once the breaker's own bookkeeping is done
 A context the caller cancels counts as neither a success nor a failure
 ([ADR-0005](docs/adr/0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md)).
 
+`Execute` also takes a trailing `...CallOption`, reserved for a future
+per-call option and empty today — there is nothing to pass yet
+([ADR-0014](docs/adr/0014-execute-gains-an-empty-call-option-slot.md)).
+
+For an operation that returns only an error — a publish, a delete, a
+fire-and-forget write — `Do` skips inventing a result type to satisfy
+`Execute`'s generic:
+
+```go
+err := bastion.Do(ctx, breaker, func(ctx context.Context) error {
+	return realOp(ctx)
+})
+```
+
+`Do` is a thin wrapper around `Execute[struct{}]`, sharing every admission,
+counting, and hook-firing decision exactly — never a second code path that
+could drift from `Execute`'s own.
+
 ### Construct one — `New` and its options
 
 ```go
@@ -154,6 +172,30 @@ validated: a non-positive threshold, timeout, or allowance, or a nil
 `Clock`, returns [`ErrInvalidConfig`](errors.go) rather than building a
 breaker that would misbehave later. `WithClock` exists for tests — see
 [`Clock`](clock.go) — hosts leave it at the default `SystemClock`.
+
+### One breaker per key — `Group`
+
+```go
+group, err := bastion.NewGroup(10_000, bastion.WithFailureThreshold(5))
+breaker, err := group.Get("tenant-42") // created on first use, then reused
+```
+
+The shape almost every real consumer needs — one breaker per downstream
+host, per tenant, per endpoint — without hand-writing the same map, mutex,
+and double-checked get-or-create. Every member shares the `Option`s given to
+`NewGroup`; a `Group` a caller constructs and holds is an ordinary value, not
+the global registry IR-03 forbids.
+
+`maxKeys` is required, not optional: a `Group` keyed by anything
+attacker-influenced (a tenant id, a `Host` header) is a memory-exhaustion
+vector otherwise. Once full, `Get` for a **new** key returns
+[`ErrGroupFull`](errors.go) rather than silently evicting an existing
+member's accumulated evidence — an existing key stays servable regardless.
+`group.Delete("tenant-42")` frees a key deliberately; `group.Len()` reports
+how close the group is to its cap. See
+[SECURITY.md](SECURITY.md#group-and-adversarial-keys) for why the cap is a
+backstop, not a substitute for validating the key itself
+([ADR-0019](docs/adr/0019-group-bounds-growth-with-a-required-cap-not-eviction.md)).
 
 ### Retry — `Retry` and `RetryPolicy`
 
@@ -176,6 +218,21 @@ An invalid policy (a negative field, or `MaxDelay` below `BaseDelay`, or
 the operation. The wait between attempts is a timer raced against `ctx`,
 never `time.Sleep`; a cancelled context returns at once with its own error,
 not the previous attempt's.
+
+Composed as shown above, a rejection from the breaker (`ErrOpenState`,
+`ErrTooManyRequests`) stops the loop immediately instead of paying for the
+remaining backoff schedule first — `RetryPolicy.IsRetriable`'s nil default
+excludes exactly those two errors, since a rejected attempt never reached
+the dependency
+([ADR-0011](docs/adr/0011-retry-skips-the-wait-after-a-breaker-rejection.md)).
+Set `IsRetriable` to retry through a rejection anyway, or to exclude other
+permanent errors of your own.
+
+`RetryPolicy` has no field bounding total elapsed time — wrap the whole call
+in `context.WithTimeout` instead. No further attempt starts once `ctx` is
+Done, but an attempt already in flight is not forcibly cut off, since a
+context deadline is cooperative, not preemptive
+([ADR-0012](docs/adr/0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md)).
 
 ### Fallback — `Fallback`
 
@@ -221,6 +278,68 @@ Every field may be `nil`; `nil` is a no-op. Handlers run synchronously, on
 the calling goroutine — route them into your own metrics or logging
 pipeline asynchronously from there, since a slow handler here blocks the
 request behind it.
+
+#### A worked example: wiring `Hooks` to Prometheus
+
+No metrics library appears in this module (NFR-03), and none ships as a
+separate adapter module either — `Hooks` is already a complete, sufficient
+extension point, and the actual gap is a correct example rather than a
+missing mechanism
+([ADR-0018](docs/adr/0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md)).
+This is the shape, using `prometheus/client_golang`:
+
+```go
+var (
+	callsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "breaker_calls_total",
+	}, []string{"breaker", "state", "outcome"})
+
+	rejectsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "breaker_rejects_total",
+	}, []string{"breaker", "state"})
+
+	stateChangesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "breaker_state_changes_total",
+	}, []string{"breaker", "from", "to"})
+)
+
+hooks := bastion.Hooks{
+	OnCall: func(_ context.Context, ev bastion.CallEvent) {
+		outcome := "success"
+		if ev.Err != nil {
+			outcome = "failure"
+		}
+		callsTotal.With(prometheus.Labels{
+			"breaker": ev.Name, "state": ev.State.String(), "outcome": outcome,
+		}).Inc()
+	},
+	OnReject: func(_ context.Context, ev bastion.RejectEvent) {
+		rejectsTotal.With(prometheus.Labels{
+			"breaker": ev.Name, "state": ev.State.String(),
+		}).Inc()
+	},
+	OnStateChange: func(_ context.Context, ev bastion.StateChangeEvent) {
+		stateChangesTotal.With(prometheus.Labels{
+			"breaker": ev.Name, "from": ev.From.String(), "to": ev.To.String(),
+		}).Inc()
+	},
+}
+```
+
+**The point of this example is the label set, not the wiring.** Every label
+above — `breaker` (a name an operator chose at construction, one per
+dependency, not per call), `state`, `outcome`, `from`, `to` — is drawn from
+a small, fixed vocabulary. This is what keeps a time series count bounded
+regardless of how long the process runs or how much traffic it serves. The
+mistake this example exists to head off is reaching for `ev.Err.Error()` as
+a label: an error string is effectively unbounded — every distinct message
+a dependency ever produces becomes its own permanent time series in
+whatever backend is scraping this, and *that* is the specific way a metrics
+backend falls over (issue #58). If per-error-type breakdown is genuinely
+needed, classify `ev.Err` into a small, fixed set of reasons first (the same
+discipline [`WithIsFailure`](#construct-one--new-and-its-options) already
+applies to counting) and use the classified value as the label, never the
+raw error text.
 
 ## Design shape
 

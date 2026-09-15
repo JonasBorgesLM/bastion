@@ -21,10 +21,20 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0003`](0003-a-panic-always-counts-as-a-failure-and-is-re-raised.md) | A panic in the operation always counts as a failure, and is re-raised unchanged | Accepted | — |
 | [`0004`](0004-a-stale-half-open-probe-times-out-back-to-open.md) | A stale half-open probe expires back to Open, on the same timeout | Accepted | — |
 | [`0005`](0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md) | Context cancellation is detected by reading the outer ctx, not by matching the returned error | Accepted | — |
-| [`0006`](0006-retry-composes-around-the-breaker-not-inside-it.md) | Retry composes around the breaker, not inside it | Accepted | — |
+| [`0006`](0006-retry-composes-around-the-breaker-not-inside-it.md) | Retry composes around the breaker, not inside it | Accepted | [`0011`](0011-retry-skips-the-wait-after-a-breaker-rejection.md) (point 2, partial) |
 | [`0007`](0007-no-dedicated-timeout-helper.md) | No dedicated timeout helper — FR-07 is satisfied by documenting the pattern | Accepted | — |
 | [`0008`](0008-fallback-is-a-post-execute-call-site-function.md) | Fallback is a post-Execute, call-site function — never nested inside op | Accepted | — |
 | [`0009`](0009-bastion-plugs-in-first-at-the-gateway.md) | bastion plugs in first at the gateway, and the two host-side rules that composition needs | Accepted | — |
+| [`0010`](0010-a-hook-panic-never-corrupts-bookkeeping.md) | A hook panic never corrupts bookkeeping; op never running is accounted like a cancelled call, not a failure | Accepted | — |
+| [`0011`](0011-retry-skips-the-wait-after-a-breaker-rejection.md) | Retry skips the wait after a breaker rejection, via a caller-overridable retriability predicate | Accepted | — |
+| [`0012`](0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md) | Retry's total elapsed time is bounded by the caller's context, not a MaxElapsedTime field | Accepted | — |
+| [`0013`](0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md) | Provenance attests a reproducible source tarball, not a compiled artifact | Accepted | — |
+| [`0014`](0014-execute-gains-an-empty-call-option-slot.md) | Execute gains an empty CallOption slot; Retry and Fallback do not | Accepted | — |
+| [`0015`](0015-counts-answers-only-what-the-hook-stream-cannot.md) | Counts answers only what the hook stream cannot, and adds nothing to the hot path | Accepted | — |
+| [`0016`](0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md) | The single-mutex throughput ceiling is measured and accepted, not optimized away | Accepted | — |
+| [`0017`](0017-manual-trip-and-reset.md) | Manual Trip is sticky until Reset; Reset clears everything; both are visible as Manual | Accepted | — |
+| [`0018`](0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md) | A metrics adapter is a documented pattern, not a shipped satellite module | Accepted | — |
+| [`0019`](0019-group-bounds-growth-with-a-required-cap-not-eviction.md) | Group bounds growth with a required cap and an explicit error, not eviction | Accepted | — |
 
 ## Open questions
 
@@ -39,7 +49,21 @@ numbers. The numbers in the first column are for conversation, not for citation.
 | # | Question | Needed by |
 | --- | --- | --- |
 
-None open. See the Index above for how each of the nine was resolved.
+None open. See the Index above for how each of the nine original questions
+was resolved. [ADR-0010](0010-a-hook-panic-never-corrupts-bookkeeping.md),
+[ADR-0011](0011-retry-skips-the-wait-after-a-breaker-rejection.md),
+[ADR-0012](0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md),
+[ADR-0013](0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md),
+[ADR-0014](0014-execute-gains-an-empty-call-option-slot.md),
+[ADR-0015](0015-counts-answers-only-what-the-hook-stream-cannot.md),
+[ADR-0016](0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md),
+[ADR-0017](0017-manual-trip-and-reset.md),
+[ADR-0018](0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md),
+and
+[ADR-0019](0019-group-bounds-growth-with-a-required-cap-not-eviction.md)
+are not answers to questions from this table — they answer defects and
+open items the B9/B10 audit found (issues #46, #47/#48, #49, #51, #52, #53,
+#55, #54, #58, and #56), not questions deferred from an earlier phase.
 Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
 recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)

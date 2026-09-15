@@ -37,6 +37,12 @@ type Breaker struct {
 	// probe is due (FR-01, NFR-05).
 	openedAt time.Time
 
+	// manualTrip is true exactly while a Trip call is in effect and Reset has
+	// not yet cleared it. Checked first in effectiveState, before openedAt
+	// and openTimeout are even consulted: unlike an evidence-driven Open, a
+	// manual trip does not expire on its own (ADR-0017).
+	manualTrip bool
+
 	// halfOpenInFlight counts probes admitted and not yet completed, bounded
 	// by halfOpenMaxCalls.
 	halfOpenInFlight int
@@ -71,16 +77,8 @@ func New(name string, opts ...Option) (*Breaker, error) {
 		return nil, fmt.Errorf("%w: a breaker must be named", ErrInvalidConfig)
 	}
 
-	o := options{
-		failureThreshold: defaultFailureThreshold,
-		openTimeout:      defaultOpenTimeout,
-		halfOpenMaxCalls: defaultHalfOpenMaxCalls,
-		clock:            SystemClock{},
-	}
-	for _, opt := range opts {
-		opt(&o)
-	}
-	if err := o.validate(); err != nil {
+	o, err := buildOptions(opts)
+	if err != nil {
 		return nil, err
 	}
 
@@ -114,9 +112,136 @@ func (b *Breaker) State() State {
 	return b.effectiveState(b.clock.Now())
 }
 
+// Counts is a snapshot of a Breaker's current bookkeeping, taken under the
+// same lock every call already uses (FR-13, NFR-01). It answers what the
+// [Hooks] event stream cannot — what this breaker's state looks like right
+// now — not what has happened over time, which a host already gets exactly
+// by counting [Hooks.OnCall] and [Hooks.OnReject] events
+// (docs/adr/0015-counts-answers-only-what-the-hook-stream-cannot.md).
+type Counts struct {
+	// State is the breaker's current state, including a timeout already
+	// elapsed — the same value [Breaker.State] would return, computed once
+	// so Counts is an internally consistent snapshot rather than several
+	// separately-read fields.
+	State State
+
+	// ConsecutiveFailures counts toward FailureThreshold. Zero unless State
+	// is [StateClosed] (FR-02): a probe or a rejection is not itself a
+	// consecutive failure, and this field is not "how many failures led to
+	// the current state," only "how many more would trip it from here."
+	ConsecutiveFailures int
+
+	// FailureThreshold is the value given to [WithFailureThreshold] (or its
+	// default), included so a caller holding only a Counts value — not the
+	// options [New] was given — can compute how close ConsecutiveFailures is
+	// to tripping the circuit without needing to have kept that number
+	// itself.
+	FailureThreshold int
+
+	// OpenedAt is when the current Open episode began. Zero unless State is
+	// [StateOpen] — not "the last time this breaker was Open," which would
+	// stay stale and misleading long after it recovered.
+	OpenedAt time.Time
+
+	// Manual reports whether the current Open episode is a standing
+	// [Breaker.Trip] rather than one evidence derived (ADR-0017). False
+	// unless State is [StateOpen]. Poll this rather than relying on catching
+	// [Hooks.OnStateChange]'s own Manual field at the right moment — a
+	// manual trip is ongoing state, and this answers "is it still in effect
+	// right now" independent of whether a handler was listening when it
+	// began.
+	Manual bool
+}
+
+// Counts returns a snapshot of b's current bookkeeping (FR-09, FR-13).
+//
+// Every field is already-stored state — Counts adds nothing to Execute's
+// hot path, no new field on Breaker and no new write in admit or complete
+// (docs/adr/0015-counts-answers-only-what-the-hook-stream-cannot.md).
+func (b *Breaker) Counts() Counts {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	eff := b.effectiveState(b.clock.Now())
+	c := Counts{
+		State:               eff,
+		ConsecutiveFailures: b.consecutiveFailures,
+		FailureThreshold:    b.failureThreshold,
+	}
+	if eff == StateOpen {
+		c.OpenedAt = b.openedAt
+		c.Manual = b.manualTrip
+	}
+	return c
+}
+
+// Trip forces the circuit to [StateOpen] immediately, regardless of its
+// current state or accumulated evidence. Unlike an evidence-driven Open, a
+// manual trip does not expire on [WithOpenTimeout] — it rejects every call
+// with [ErrOpenState] until [Breaker.Reset] is called (ADR-0017).
+//
+// Calling Trip again while the circuit is already Open — evidence-driven or
+// already manually tripped — re-affirms the trip (the episode [Breaker.Counts]
+// reports via OpenedAt restarts from now) without firing a second
+// [Hooks.OnStateChange]: From and To would both be StateOpen, and a
+// transition whose state does not actually change does not emit an event,
+// the same rule every other transition already follows. A [Hooks.OnStateChange]
+// with Manual true fires only when this call actually changes the circuit's
+// raw state.
+func (b *Breaker) Trip(ctx context.Context) {
+	b.mu.Lock()
+	from := b.state
+	b.state = StateOpen
+	b.openedAt = b.clock.Now()
+	b.manualTrip = true
+	b.halfOpenGeneration++ // ADR-0004: any in-flight probe is now stale
+	b.halfOpenInFlight = 0
+	var ev *StateChangeEvent
+	if from != StateOpen {
+		ev = &StateChangeEvent{Name: b.name, From: from, To: StateOpen, Manual: true}
+	}
+	b.mu.Unlock()
+
+	if ev != nil {
+		b.fireStateChange(ctx, ev)
+	}
+}
+
+// Reset clears everything a manual trip or accumulated evidence left
+// behind — any standing [Breaker.Trip], [Counts.ConsecutiveFailures], and
+// the circuit's state — unconditionally to [StateClosed] (ADR-0017). It is
+// how a confirmed fix is told to the breaker immediately, without waiting
+// out [WithOpenTimeout] or the Half-Open probe it would otherwise admit
+// first.
+//
+// A [Hooks.OnStateChange] with Manual true fires only if the circuit was not
+// already Closed.
+func (b *Breaker) Reset(ctx context.Context) {
+	b.mu.Lock()
+	from := b.state
+	b.state = StateClosed
+	b.consecutiveFailures = 0
+	b.manualTrip = false
+	b.halfOpenGeneration++ // ADR-0004: any in-flight probe is now stale
+	b.halfOpenInFlight = 0
+	var ev *StateChangeEvent
+	if from != StateClosed {
+		ev = &StateChangeEvent{Name: b.name, From: from, To: StateClosed, Manual: true}
+	}
+	b.mu.Unlock()
+
+	if ev != nil {
+		b.fireStateChange(ctx, ev)
+	}
+}
+
 // effectiveState computes what State() should report right now, without
 // mutating any field. Call with b.mu held.
 func (b *Breaker) effectiveState(now time.Time) State {
+	if b.manualTrip {
+		// ADR-0017: sticky until Reset -- openedAt/openTimeout are not
+		// consulted at all while a manual trip is in effect.
+		return StateOpen
+	}
 	switch b.state {
 	case StateOpen:
 		if now.Sub(b.openedAt) >= b.openTimeout {
@@ -311,6 +436,33 @@ func (b *Breaker) fireStateChange(ctx context.Context, ev *StateChangeEvent) {
 	b.hooks.OnStateChange(ctx, *ev)
 }
 
+// runHookSafely calls fn, recovering any panic instead of letting it
+// propagate immediately. Every hook call site in Execute uses this, so one
+// hook's panic can never prevent bastion's own bookkeeping — or a sibling
+// hook — from running (ADR-0010). The panic value, if any, is returned so the
+// caller can decide what to do with it.
+func runHookSafely(fn func()) (panicValue any) {
+	defer func() {
+		panicValue = recover()
+	}()
+	fn()
+	return nil
+}
+
+// callOptions accumulates [CallOption] values for a single call to [Execute].
+// Deliberately empty — no option is defined yet (ADR-0014). It exists so a
+// future option is a compatible addition: a new field here and a new
+// WithXxx constructor, never a change to Execute's own signature.
+type callOptions struct{}
+
+// CallOption customizes a single call to [Execute]. No option is defined
+// yet; see docs/adr/0014-execute-gains-an-empty-call-option-slot.md for why
+// the slot exists anyway. callOptions is unexported, so no caller outside
+// this package can construct a non-nil CallOption today — passing none is
+// the only thing to do with this parameter until a WithXxx constructor is
+// added.
+type CallOption func(*callOptions)
+
 // Execute runs op through b: admitted immediately in [StateClosed], admitted
 // as a bounded probe in [StateHalfOpen], and refused without invoking op in
 // [StateOpen] — returning [ErrOpenState] or [ErrTooManyRequests] (ADR-0001).
@@ -334,75 +486,168 @@ func (b *Breaker) fireStateChange(ctx context.Context, ev *StateChangeEvent) {
 // Hooks fire synchronously, on the calling goroutine, always after b.mu has
 // been released (FR-09, IR-02): a transition caused by admitting the call,
 // then op runs, then [Hooks.OnCall] or [Hooks.OnReject], then a transition
-// caused by the call's outcome, if any.
+// caused by the call's outcome, if any. A panic in a hook is recovered and
+// re-raised to this call's own caller only once bastion's own bookkeeping for
+// this call is fully resolved — it can never leave a Half-Open slot admitted
+// and never released, and it can never prevent op from being invoked or a
+// sibling hook from running (ADR-0010). If op itself also panics, op's panic
+// is what reaches the caller (ADR-0003's unconditional priority); a hook's
+// panic in that case is resolved but not the one re-raised.
+//
+// If a hook prevents op from ever being invoked at all — by panicking, or by
+// calling runtime.Goexit, before op is reached — that call is accounted like
+// a cancelled context: neither a failure nor a success, since the breaker has
+// no evidence about the dependency, only that its own hook broke
+// (ADR-0010). The same accounting applies if op itself calls runtime.Goexit
+// without returning: bastion cannot tell that apart from op's own panic, so
+// it is treated the same way, unconditionally, as FR-11 already treats one.
 //
 // If op is being invoked as a probe into a dependency that may still be
 // unavailable, it should itself respect ctx's deadline where one is set. A
 // probe that never returns cannot strand the circuit (FR-12, ADR-0004), but a
 // bounded probe recovers on its own without ever admitting a second,
 // overlapping one.
-func Execute[T any](ctx context.Context, b *Breaker, op func(context.Context) (T, error)) (T, error) {
+//
+// opts is reserved for future per-call options (ADR-0014); no option is
+// defined yet, and every call site today correctly passes none.
+func Execute[T any](
+	ctx context.Context, b *Breaker, op func(context.Context) (T, error),
+	opts ...CallOption,
+) (T, error) {
+	var o callOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	var zero T
 
 	adm := b.admit(b.clock.Now())
-	b.fireStateChange(ctx, adm.transition)
 
 	if !adm.admitted {
+		var hookPanic any
+		capture := func(p any) {
+			if p != nil && hookPanic == nil {
+				hookPanic = p
+			}
+		}
+		capture(runHookSafely(func() { b.fireStateChange(ctx, adm.transition) }))
 		if b.hooks.OnReject != nil {
-			b.hooks.OnReject(ctx, RejectEvent{Name: b.name, State: adm.state, Reason: adm.reject})
+			capture(runHookSafely(func() {
+				b.hooks.OnReject(ctx, RejectEvent{Name: b.name, State: adm.state, Reason: adm.reject})
+			}))
+		}
+		if hookPanic != nil {
+			panic(hookPanic)
 		}
 		return zero, adm.reject
 	}
 
-	result, panicked, recovered, err := callSafely(ctx, op)
-
-	var oc outcome
-	switch {
-	case panicked:
-		// ADR-0003: unconditional, even if ctx also happens to be Done — a
-		// panic is never evidence that the caller gave up.
-		oc = outcomeFailure
-	case ctx.Err() != nil:
-		// ADR-0005: read on ctx itself, the exact value passed into Execute —
-		// never on err, which cannot tell caller cancellation apart from an
-		// operation's own internally-derived context timing out.
-		oc = outcomeCancelled
-	case b.classify(err):
-		oc = outcomeFailure
-	default:
-		oc = outcomeSuccess
-	}
-
-	completion := b.complete(b.clock.Now(), adm, oc)
-	b.fireStateChange(ctx, completion)
-
-	if b.hooks.OnCall != nil {
-		callErr := err
-		if panicked {
-			// FR-11: the caller gets the original recovered value via panic()
-			// below, unchanged. This is only what the hook sees — CallEvent.Err
-			// is typed error, and a recovered value is not one.
-			callErr = fmt.Errorf("bastion: operation panicked: %v", recovered)
+	var (
+		result      T
+		opErr       error
+		opStarted   bool // true once Execute has begun calling op
+		opRan       bool // true once op has returned normally (not via panic or Goexit)
+		opPanicked  bool
+		opRecovered any
+		hookPanic   any
+	)
+	capture := func(p any) {
+		if p != nil && hookPanic == nil {
+			hookPanic = p
 		}
-		b.hooks.OnCall(ctx, CallEvent{Name: b.name, State: adm.state, Err: callErr, Counted: oc == outcomeFailure})
 	}
 
-	if panicked {
-		panic(recovered)
+	func() {
+		// Registered before the admission hook or op run, so admit's mutation
+		// of shared state (incrementing halfOpenInFlight for a probe) is
+		// always matched by a complete call — on a normal return, a panic
+		// anywhere in this closure, or a runtime.Goexit anywhere in it.
+		// Defers run on Goexit; the rest of this closure's code, and
+		// everything in Execute after the call to it, does not (ADR-0010).
+		defer func() {
+			if r := recover(); r != nil {
+				if opStarted {
+					opPanicked = true
+					opRecovered = r
+				} else {
+					capture(r) // the admission hook panicked before op was ever attempted
+				}
+			}
+
+			var oc outcome
+			switch {
+			case !opStarted:
+				oc = outcomeCancelled
+			case opPanicked:
+				oc = outcomeFailure
+			case !opRan:
+				// op was invoked but never returned normally: it called
+				// runtime.Goexit. Treated the same as an ordinary panic
+				// (FR-11) — bastion cannot tell a caller bug from
+				// dependency-triggered corruption either way, and an
+				// operation that never completed is not evidence the
+				// dependency is healthy.
+				oc = outcomeFailure
+			case ctx.Err() != nil:
+				oc = outcomeCancelled
+			case b.classify(opErr):
+				oc = outcomeFailure
+			default:
+				oc = outcomeSuccess
+			}
+
+			completion := b.complete(b.clock.Now(), adm, oc)
+			capture(runHookSafely(func() { b.fireStateChange(ctx, completion) }))
+
+			if b.hooks.OnCall != nil {
+				callErr := opErr
+				switch {
+				case !opStarted:
+					callErr = fmt.Errorf("bastion: a hook panicked before the operation could run")
+				case opPanicked:
+					// FR-11: the caller gets the original recovered value via
+					// panic() below, unchanged. This is only what the hook
+					// sees — CallEvent.Err is typed error, and a recovered
+					// value is not one.
+					callErr = fmt.Errorf("bastion: operation panicked: %v", opRecovered)
+				}
+				capture(runHookSafely(func() {
+					b.hooks.OnCall(ctx, CallEvent{Name: b.name, State: adm.state, Err: callErr, Counted: oc == outcomeFailure})
+				}))
+			}
+		}()
+
+		b.fireStateChange(ctx, adm.transition)
+		opStarted = true
+		result, opErr = op(ctx)
+		opRan = true
+	}()
+
+	switch {
+	case opPanicked:
+		panic(opRecovered) // ADR-0003: unconditional priority over any hook panic
+	case hookPanic != nil:
+		panic(hookPanic)
 	}
-	return result, err
+	return result, opErr
 }
 
-// callSafely runs op, recovering a panic instead of letting it unwind through
-// the breaker's own bookkeeping. b.mu is never involved here — this is called
-// only after admit has already released it.
-func callSafely[T any](ctx context.Context, op func(context.Context) (T, error)) (result T, panicked bool, recovered any, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panicked = true
-			recovered = r
-		}
-	}()
-	result, err = op(ctx)
-	return result, false, nil, err
+// Do runs op through b exactly as [Execute] does, for an operation that
+// returns only an error — a publish, a delete, a fire-and-forget write,
+// which is a large share of what gets guarded and has no result worth
+// naming a type for (issue #57).
+//
+// Do is a thin wrapper around Execute[struct{}] — every admission, counting,
+// and hook-firing decision is Execute's own, so the two can never drift
+// apart into two behaviors for what is really one operation. See Execute's
+// own godoc for the full contract this shares exactly, including how a
+// panic, a cancelled context, and opts are handled.
+func Do(
+	ctx context.Context, b *Breaker, op func(context.Context) error,
+	opts ...CallOption,
+) error {
+	_, err := Execute(ctx, b, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, op(ctx)
+	}, opts...)
+	return err
 }

@@ -87,6 +87,14 @@ at every step it can, deliberately including the very first release:
   uploads it as an artifact the `release` job assembles into the GitHub
   Release notes — a changelog generated from what actually changed, not
   written from memory.
+- **Attests build provenance for a plain tarball of the exact tagged tree**,
+  uploaded as a release asset — a verifiable record that this content passed
+  the checks above before being tagged, not merely that the maintainer
+  signed it (see the next bullet). Scoped deliberately to that claim, not to
+  the compiled binary bastion does not produce or the zip
+  `proxy.golang.org` assembles independently for `go get`
+  ([ADR-0013](docs/adr/0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md);
+  verification steps in [`SECURITY.md`](SECURITY.md#provenance)).
 - **Refuses to publish an unsigned tag.** `.github/allowed_signers` ships
   empty on purpose: `git verify-tag` fails until a human adds their own SSH
   public key there, per the comment in that file. An unsigned release is one

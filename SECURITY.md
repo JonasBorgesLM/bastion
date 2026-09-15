@@ -43,8 +43,88 @@ to look for.
   the response mapping and rate-limit interaction described in
   [`REQUIREMENTS.md`](REQUIREMENTS.md) §5.1 — those are the host's code. Report
   those to the service that owns them.
+- **The one exception to "holds no secret":** if a guarded operation panics,
+  [`Hooks.OnCall`](hooks.go)'s `CallEvent.Err` carries a `fmt.Errorf("%v",
+  ...)` of the panic value (ADR-0003) — whatever that value is, a struct, a
+  request object, anything with a `String` method that renders more than
+  intended. That value comes from the host's own operation, not from bastion,
+  and a host's own `recover` would see the same thing; bastion neither adds to
+  it nor redacts it. A host wiring `OnCall` into a log sink is the one place a
+  caller value crosses into a log line via this library, and should treat
+  `Err` accordingly on that specific path — nowhere else in bastion's own
+  output does this apply.
+
+## Group and adversarial keys
+
+[`Group`](group.go) creates one `*Breaker` per key, on first use. If that
+key comes from something an attacker influences — a tenant id, a `Host`
+header, anything reachable from outside a request — an unbounded `Group`
+is a memory-exhaustion vector: each new garbage key is a new, permanent
+allocation
+([ADR-0019](docs/adr/0019-group-bounds-growth-with-a-required-cap-not-eviction.md)).
+
+`NewGroup` requires a `maxKeys` cap for exactly this reason — it is a
+required positional argument, not a default a caller could leave unset.
+Once a `Group` holds `maxKeys` distinct keys, `Get` for a **new** key
+returns [`ErrGroupFull`](errors.go) rather than growing further; an
+existing key is always still servable, so the cap does not itself create an
+outage for traffic already being served.
+
+**The cap bounds bastion's own memory; it does not make an untrusted key
+space safe to use unfiltered.** A `Group` with `MaxKeys=10000` keyed
+directly by an unauthenticated header still lets an attacker occupy all
+10000 slots with garbage values, denying legitimate ones their own
+breaker — a full but bounded group, not an unbounded one, but still a
+denial of service for real keys arriving after the cap is reached. The cap
+is a backstop against a bug or an oversight, not a substitute for the
+stronger mitigation: validate the key against a known set (drawn from your
+own configuration, not from the request) *before* it ever reaches `Get`,
+wherever the key would otherwise come directly from untrusted input.
+[`Group.Delete`](group.go) lets a host reclaim a key it knows has left for
+good (a tenant offboarded, a host decommissioned); [`Group.Len`](group.go)
+lets a host watch how close it is to the cap before `ErrGroupFull` is the
+first sign of trouble.
 
 ## Supported versions
 
 Pre-1.0. Only the latest tag receives fixes. There are no backports, and there
 is nothing to back-port to yet.
+
+## Provenance
+
+Every release answers two different questions, checked two different ways
+([ADR-0013](docs/adr/0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md)):
+
+**Who authorized this tag** — verify the signature against the maintainer's
+key in [`.github/allowed_signers`](.github/allowed_signers):
+
+```bash
+git clone https://github.com/JonasBorgesLM/bastion && cd bastion
+git config gpg.ssh.allowedSignersFile .github/allowed_signers
+git verify-tag v0.1.0
+```
+
+**Did this content pass bastion's own CI gates before being tagged** —
+verify the attestation on the source tarball GitHub attaches to the release
+(`bastion-<version>.tar`):
+
+```bash
+gh release download v0.1.0 -R JonasBorgesLM/bastion -p 'bastion-*.tar'
+gh attestation verify bastion-v0.1.0.tar -R JonasBorgesLM/bastion
+```
+
+This confirms the tarball was produced by bastion's own `release.yml`
+workflow, at the tagged commit, after `go vet`, `go test -race`,
+`govulncheck`, the zero-dependency/no-`net/http` boundary, and
+`check-docs.sh` all passed. It is not a claim about the exact bytes
+`go get` resolves — `proxy.golang.org` assembles that independently, and
+`sum.golang.org`'s transparency log is what already guarantees that content
+is unchanged since anyone first fetched it. A security-conscious consumer
+who wants the reproducibility guarantee on top of the CI-provenance one can
+regenerate the same tarball from the tagged commit and compare digests:
+
+```bash
+git archive --format=tar --prefix=bastion-v0.1.0/ \
+  --output=bastion-v0.1.0.tar v0.1.0
+sha256sum bastion-v0.1.0.tar
+```

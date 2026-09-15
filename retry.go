@@ -2,6 +2,7 @@ package bastion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"time"
@@ -37,6 +38,15 @@ type RetryPolicy struct {
 	// a recovering service into one thundering herd, which is the failure
 	// retry was supposed to prevent.
 	Jitter float64
+
+	// IsRetriable reports whether err is worth retrying. nil (the default)
+	// retries every error except a rejection from a [Breaker]'s [Execute] —
+	// [ErrOpenState] or [ErrTooManyRequests] — since retrying immediately
+	// after either wastes the backoff wait on a call that was never going to
+	// reach the dependency (ADR-0011). Set a non-nil function to retry
+	// through a rejection anyway, or to also exclude other permanent errors
+	// (a 400, say) from the retry budget.
+	IsRetriable func(error) bool
 }
 
 // validate reports whether p describes anything [Retry] can act on. Checked
@@ -75,11 +85,22 @@ const overflowGuard = time.Duration(1) << 61
 // suppressed at the call site with the reasoning above, not silenced
 // globally.
 //
-// Doubling is done iteratively with a clamp at every step, rather than by
-// shifting attempt-2 bits at once, so a policy with a very large MaxAttempts
-// can never compute an overflowed or negative duration: as soon as the
-// running value would cross MaxDelay (or overflowGuard, absent a MaxDelay),
-// growth stops.
+// Doubling is done iteratively with a clamp checked immediately after every
+// step, rather than by shifting attempt-2 bits at once, so a policy with a
+// very large MaxAttempts can never compute an overflowed or negative
+// duration: as soon as the running value would cross MaxDelay (or
+// overflowGuard, absent a MaxDelay), growth stops.
+//
+// The clamp is checked right after d *= 2, not before it, and this is
+// deliberate, not a style choice: a check placed ahead of the doubling
+// instead only catches an overshoot if the loop runs at least one more
+// iteration afterward to notice it -- on the loop's *last* iteration, with
+// no further iteration left, an overshoot on that final doubling would
+// escape uncaught (found by FuzzNextDelay, retry_internal_test.go, within
+// seconds of the first real fuzzing run: nextDelay(BaseDelay=10ms,
+// attempt=40) exceeded overflowGuard while nextDelay(..., attempt=41)
+// correctly clamped back down to it -- a transient non-monotonic spike the
+// hand-picked overflow regression test below never exercised).
 func nextDelay(p RetryPolicy, attempt int) time.Duration {
 	shift := max(attempt-2, 0)
 
@@ -89,15 +110,11 @@ func nextDelay(p RetryPolicy, attempt int) time.Duration {
 			d = p.MaxDelay
 			break
 		}
-		if d > overflowGuard {
-			if p.MaxDelay > 0 {
-				d = p.MaxDelay
-			} else {
-				d = overflowGuard
-			}
+		d *= 2
+		if p.MaxDelay == 0 && d > overflowGuard {
+			d = overflowGuard
 			break
 		}
-		d *= 2
 	}
 	if p.MaxDelay > 0 && d > p.MaxDelay {
 		d = p.MaxDelay
@@ -113,6 +130,16 @@ func nextDelay(p RetryPolicy, attempt int) time.Duration {
 // first. A zero or negative d still checks ctx once rather than skipping the
 // wait unconditionally: a context already done when a retry attempt finishes
 // must stop the loop even when there is nothing left to wait out.
+//
+// This is the one place in the package that waits for real time to pass, and
+// it does so with time.NewTimer directly, never through a [Clock] — Retry
+// takes no Clock at all, unlike [Breaker]. Clock exists so a state
+// transition's *decision* (has this timeout elapsed) can be tested without
+// the wall clock; a real wait here still has to actually wait, on whatever
+// clock the runtime's timer uses, so substituting one would let a test skip
+// the wait without proving Retry actually waits. See [Clock]'s own godoc,
+// "This interface cannot grow a second method," for the other half of why
+// this asymmetry is deliberate rather than an oversight.
 func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		select {
@@ -133,7 +160,8 @@ func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 }
 
 // Retry calls op, retrying on error per p, and returns the first success or
-// the last attempt's error once p.MaxAttempts is reached (FR-06).
+// the last attempt's error once p.MaxAttempts is reached, or the first
+// attempt whose error p.IsRetriable rejects (FR-06).
 //
 // Retry has no notion of a [Breaker] and touches none of a Breaker's counters
 // — it composes with one entirely by nesting at the call site, and the
@@ -150,6 +178,15 @@ func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 // before one logical call's own retry budget is exhausted, on purpose — the
 // threshold counts real attempts against the dependency, not logical calls.
 //
+// An attempt whose error [RetryPolicy.IsRetriable] rejects stops the loop
+// immediately — no further attempt, and no wait beforehand — rather than
+// spending the remaining budget and backoff schedule on a call already known
+// not to be worth repeating (ADR-0011). The default rejects exactly a
+// rejection from a Breaker's own Execute ([ErrOpenState],
+// [ErrTooManyRequests]): recognizing those two sentinel *values* is a
+// materially weaker coupling than Retry referencing a `*Breaker`, which it
+// still never does.
+//
 // The wait between attempts is a timer raced against ctx, never time.Sleep: a
 // context cancelled mid-wait makes Retry return at once, with ctx's own
 // error — not the previous attempt's — since the caller stopped waiting on
@@ -162,6 +199,21 @@ func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 // (docs/adr/0007-no-dedicated-timeout-helper.md) if a per-attempt timeout is
 // wanted.
 //
+// RetryPolicy has no field bounding the total time a call to Retry may take;
+// wrap the whole call in [context.WithTimeout] instead:
+//
+//	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+//	defer cancel()
+//	result, err := bastion.Retry(ctx, policy, op)
+//
+// Because a context deadline is cooperative rather than preemptive, this
+// bounds the loop the way a caller asking for a total elapsed-time budget
+// actually wants: no further attempt starts once ctx is Done — the same
+// check that already stops the loop on cancellation, reused here — but an
+// attempt already in flight when the deadline passes is not forcibly cut
+// off; it runs to completion unless op itself watches ctx and returns early
+// (docs/adr/0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md).
+//
 // Retry returns [ErrInvalidConfig] without invoking op at all if p does not
 // describe a policy it can act on.
 func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (T, error)) (T, error) {
@@ -171,6 +223,10 @@ func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (
 	}
 
 	maxAttempts := max(p.MaxAttempts, 1)
+	retriable := p.IsRetriable
+	if retriable == nil {
+		retriable = defaultIsRetriable
+	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -182,9 +238,20 @@ func Retry[T any](ctx context.Context, p RetryPolicy, op func(context.Context) (
 		if attempt == maxAttempts {
 			break
 		}
+		if !retriable(err) {
+			return zero, err
+		}
 		if werr := sleepRespectingContext(ctx, nextDelay(p, attempt+1)); werr != nil {
 			return zero, werr
 		}
 	}
 	return zero, lastErr
+}
+
+// defaultIsRetriable is used when p.IsRetriable is nil (ADR-0011): every
+// error is retriable except a rejection from a Breaker's own Execute, which
+// never reached the dependency and is not going to reach it on a retry
+// either.
+func defaultIsRetriable(err error) bool {
+	return !errors.Is(err, ErrOpenState) && !errors.Is(err, ErrTooManyRequests)
 }

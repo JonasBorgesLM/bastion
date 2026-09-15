@@ -189,6 +189,50 @@ func TestRetry_ZeroDelayWithALiveContextRunsEveryAttempt(t *testing.T) {
 	}
 }
 
+// ADR-0012: wrapping the whole Retry call in context.WithTimeout is the
+// documented way to bound total elapsed time, and this proves it delivers
+// the specific semantics a "total budget" is expected to have -- no further
+// attempt starts once the deadline passes, but an attempt already in flight
+// when it passes is not forcibly cut off, because a context deadline is
+// cooperative, not preemptive and Retry has no mechanism that could abort a
+// running op even if it wanted to. op here deliberately outlasts the
+// deadline and ignores ctx, the way a caller who forgot to make it
+// ctx-aware would, to prove the first attempt still runs to completion
+// rather than being interrupted.
+//
+// This exercises the same underlying check (sleepRespectingContext seeing
+// ctx already Done) that TestRetry_ContextCancelledDuringTheWaitReturnsAtOnceWithCtxsOwnError
+// and TestRetry_AlreadyCancelledContextStopsBeforeTheNextWait already cover
+// and verified failing under mutation; this test adds the end-to-end proof
+// specifically for a context.WithTimeout deadline expiring mid-attempt,
+// which those two did not exercise.
+func TestRetry_ContextTimeoutBoundsTotalElapsedTimeWithoutAbortingAnInFlightAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	calls := 0
+	start := time.Now()
+	_, err := bastion.Retry(ctx, bastion.RetryPolicy{MaxAttempts: 3, BaseDelay: 50 * time.Millisecond}, func(context.Context) (int, error) {
+		calls++
+		time.Sleep(60 * time.Millisecond) // outlasts the 20ms deadline, and does not watch ctx
+		return 0, errBoom
+	})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Retry() error = %v, want a match for context.DeadlineExceeded", err)
+	}
+	if calls != 1 {
+		t.Fatalf("op invoked %d times, want exactly 1 -- no attempt should start once the deadline has passed", calls)
+	}
+	if elapsed < 60*time.Millisecond {
+		t.Fatalf("Retry() returned after %s, want at least 60ms -- the in-flight attempt must run to completion, not be cut off at the 20ms deadline", elapsed)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("Retry() took %s, want well under the 50ms BaseDelay for a 2nd attempt -- a second attempt must never start", elapsed)
+	}
+}
+
 // Integration-level proof that Retry's loop is actually wired to nextDelay
 // and a real timer -- nextDelay's own exact math is covered by
 // retry_internal_test.go; this only checks the shape survives the real wait.
@@ -217,6 +261,88 @@ func TestRetry_DelaysRoughlyDoubleBetweenAttempts(t *testing.T) {
 	}
 }
 
+// ADR-0011, issue #47: reproduces the reported defect directly. A rejected
+// attempt on a NON-final try must skip both the remaining attempts and the
+// backoff that would have preceded them -- the exact claim ADR-0006 made and
+// v0.1.0 did not keep.
+//
+// Negative control: verified failing (elapsed ~= 1.4s, the full three-wait
+// schedule, and realCalls == 1 only by coincidence of the OLD code still
+// eventually giving up at MaxAttempts) against a version of Retry with the
+// `if !retriable(err) { return zero, err }` check removed -- confirmed by
+// deliberately removing it and observing this test time out its bound before
+// restoring the check.
+func TestRetry_SkipsTheWaitAfterABreakerRejection(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(1), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	realCalls := 0
+	start := time.Now()
+	_, err = bastion.Retry(context.Background(),
+		bastion.RetryPolicy{MaxAttempts: 4, BaseDelay: 200 * time.Millisecond},
+		func(ctx context.Context) (int, error) {
+			return bastion.Execute(ctx, b, func(context.Context) (int, error) {
+				realCalls++
+				return 0, errBoom
+			})
+		},
+	)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, bastion.ErrOpenState) {
+		t.Fatalf("Retry() error = %v, want a match for ErrOpenState", err)
+	}
+	if realCalls != 1 {
+		t.Fatalf("the real operation ran %d times, want 1 (attempts 2-4 must be short-circuited once the circuit is seen open)", realCalls)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Retry() took %s, want well under the full 1.4s backoff schedule (200+400+800ms) -- attempts after the rejection must not wait", elapsed)
+	}
+}
+
+// ADR-0011: a caller-supplied IsRetriable can retry through a rejection --
+// the wait DOES happen (proving the override genuinely re-enables it), even
+// though the breaker itself still refuses the underlying call each time.
+func TestRetry_IsRetriableOverrideCanRetryThroughARejection(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(1), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	realCalls := 0
+	start := time.Now()
+	_, err = bastion.Retry(context.Background(),
+		bastion.RetryPolicy{
+			MaxAttempts: 3,
+			BaseDelay:   50 * time.Millisecond,
+			IsRetriable: func(error) bool { return true },
+		},
+		func(ctx context.Context) (int, error) {
+			return bastion.Execute(ctx, b, func(context.Context) (int, error) {
+				realCalls++
+				return 0, errBoom
+			})
+		},
+	)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, bastion.ErrOpenState) {
+		t.Fatalf("Retry() error = %v, want a match for ErrOpenState (the last attempt's own rejection)", err)
+	}
+	if realCalls != 1 {
+		t.Fatalf("the real operation ran %d times, want 1 (attempts 2 and 3 are still rejected by the breaker itself; the override only keeps Retry looping through the rejection, it does not make Execute admit the call)", realCalls)
+	}
+	// Two waits (before attempts 2 and 3) must have happened: 50+100=150ms,
+	// against a lower bound with headroom for scheduling noise.
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("Retry() took %s, want at least ~150ms (the override must still wait between attempts)", elapsed)
+	}
+}
+
 // The composition test that matters more than the rest of this file (issue
 // #22): both orders are exercised with the SAME RetryPolicy and the SAME
 // FailureThreshold, so the difference in outcome is attributable only to the
@@ -225,9 +351,13 @@ func TestRetry_DelaysRoughlyDoubleBetweenAttempts(t *testing.T) {
 // Recommended order (ADR-0006): Retry wraps Execute. Each attempt is its own,
 // individually-admitted-and-counted call. FailureThreshold(2) with 3 failing
 // attempts means the breaker opens after attempt 2, and attempt 3 -- which
-// Retry still tries, since it does not know the breaker tripped -- gets
-// ErrOpenState instead of reaching the real operation. The real operation
-// therefore runs only twice, and the breaker ends Open.
+// Retry still tries, since ADR-0011's retriability check is skipped on
+// whatever attempt is already the last one (there being no further wait or
+// attempt left to save) -- gets ErrOpenState instead of reaching the real
+// operation. The real operation therefore runs only twice, and the breaker
+// ends Open. ADR-0011 changes nothing about this specific test: the
+// rejection here happens to land exactly on the final attempt, which is
+// exactly the one case the retriability check never gets to shortcut.
 func TestRetryBreakerComposition_RecommendedOrder(t *testing.T) {
 	clock := newFakeClock()
 	b, err := bastion.New("dep", bastion.WithFailureThreshold(2), bastion.WithClock(clock))
