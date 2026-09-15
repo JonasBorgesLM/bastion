@@ -94,3 +94,9 @@ blocking on, independent of what a `benchstat` comparison says about the
 absolute timing, which is expected to drift with the machine that runs it. A
 parallel number moving further from its serial counterpart than the ratios
 above is worth investigating before assuming it is only machine noise.
+
+This is not only manual discipline: `ci.yml`'s `benchmarks` job runs every
+benchmark on every push and pull request and fails if any of the `Execute`
+or `Do` benchmarks reports anything but `0 allocs/op` (issue #59) — the one
+number in this file that does not drift with the runner, so it is the one
+CI actually gates on.

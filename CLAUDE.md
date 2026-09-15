@@ -62,6 +62,8 @@ writing code, know which jobs will have an opinion:
 | --- | --- |
 | `build & test` | build, vet, or `go test -race` fails |
 | `boundaries` | `go.mod` gains a require, a `go.sum` appears, or anything reaches `net/http` |
+| `fuzz` | `FuzzNextDelay`'s corpus (`testdata/fuzz/`) regresses in a 30s run |
+| `benchmarks` | any `Execute`/`Do` benchmark reports non-zero `allocs/op` |
 | `lint` | an exported identifier has no doc comment, a `switch` over `State` misses a case, among much else |
 | `govulncheck` | a standard-library vulnerability is reachable from this code |
 | `docs` | a cited `FR-`/`NFR-`/`IR-` id does not exist, or a relative link is broken |

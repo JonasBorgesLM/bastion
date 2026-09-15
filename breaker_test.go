@@ -1015,6 +1015,14 @@ func TestExecute_ConcurrentStateReadsDuringATransition(t *testing.T) {
 // admitted (the real operation invoked, a nil error), and the remaining 17
 // must be rejected with ErrTooManyRequests without the operation running at
 // all.
+// No wall-clock sleep: an admitted probe's op blocks on release, held open
+// deterministically until every rejection has landed, rather than for a
+// fixed duration hoped to outlast scheduling on a loaded runner (issue #59).
+// A rejected call returns almost immediately -- no op call, no blocking --
+// so once exactly goroutines-3 rejections have arrived, admission for all
+// goroutines is already fully decided: WithHalfOpenMaxCalls(3) is a fixed
+// pool, so by elimination the remaining 3 are the ones currently blocked
+// inside op, and nothing can free a slot early to admit a 4th.
 func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 	clock := newFakeClock()
 	b, err := bastion.New("dep",
@@ -1030,8 +1038,12 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 	clock.Advance(10 * time.Second)
 
 	const goroutines = 20
+	const wantRejected = goroutines - 3
+
 	var realOpInvocations, admitted, rejected int64
 	start := make(chan struct{})
+	release := make(chan struct{})
+	rejections := make(chan struct{}, goroutines)
 	var wg sync.WaitGroup
 	for range goroutines {
 		wg.Add(1)
@@ -1040,7 +1052,7 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 			<-start
 			_, err := bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
 				atomic.AddInt64(&realOpInvocations, 1)
-				time.Sleep(30 * time.Millisecond)
+				<-release
 				return 42, nil
 			})
 			switch {
@@ -1048,12 +1060,23 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 				atomic.AddInt64(&admitted, 1)
 			case errors.Is(err, bastion.ErrTooManyRequests):
 				atomic.AddInt64(&rejected, 1)
+				rejections <- struct{}{}
 			default:
 				t.Errorf("Execute() error = %v, want nil or a match for ErrTooManyRequests", err)
 			}
 		}()
 	}
 	close(start)
+
+	timeout := time.After(5 * time.Second)
+	for range wantRejected {
+		select {
+		case <-rejections:
+		case <-timeout:
+			t.Fatal("timed out waiting for the expected rejections -- admission may be admitting more than WithHalfOpenMaxCalls")
+		}
+	}
+	close(release)
 	wg.Wait()
 
 	if got := atomic.LoadInt64(&realOpInvocations); got != 3 {
@@ -1062,8 +1085,8 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 	if got := atomic.LoadInt64(&admitted); got != 3 {
 		t.Fatalf("%d goroutines were admitted, want exactly 3", got)
 	}
-	if got := atomic.LoadInt64(&rejected); got != goroutines-3 {
-		t.Fatalf("%d goroutines were rejected, want exactly %d", got, goroutines-3)
+	if got := atomic.LoadInt64(&rejected); got != wantRejected {
+		t.Fatalf("%d goroutines were rejected, want exactly %d", got, wantRejected)
 	}
 	if got := b.State(); got != bastion.StateClosed {
 		t.Fatalf("State() after a successful probe resolved the window = %v, want %v", got, bastion.StateClosed)
