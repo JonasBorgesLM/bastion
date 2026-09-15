@@ -23,6 +23,32 @@ import "context"
 // metrics library, so a host wires bastion to whatever it already uses without
 // bastion appearing in anyone's dependency graph as a reason to adopt one
 // (NFR-03).
+//
+// # Two things that go wrong on the other side of the handler
+//
+// Both are about the pipeline a host routes these events into, not about this
+// package, and both fail silently — which is why they are written down here
+// rather than left to be discovered.
+//
+// **[State] is a defined type, and a pipeline with a type safelist will drop
+// it.** [StateChangeEvent.From], [StateChangeEvent.To] and [CallEvent.State]
+// are all [State], an integer type of this package's own. A telemetry pipeline
+// that accepts a fixed set of attribute types — several do — substitutes a
+// placeholder for anything outside it, with no error anywhere. The result is a
+// record where the state transition, the only interesting thing in the event,
+// reads as "unsupported value type". Call [State.String] on the way out.
+//
+// **A [Group] makes [StateChangeEvent.Name] a per-key attribute.** The name is
+// in every event by design (FR-10) — that is what lets one handler serve every
+// breaker. A Group keyed per tenant therefore emits an attribute with
+// tenant-scale cardinality, and a backend that caps distinct values per
+// attribute starts dropping it: the breaker name disappears from exactly the
+// events a per-key breaker existed to tell apart, and the drop is a counter
+// somewhere, not an error at the call site. Where the key space is large, emit
+// a bounded attribute — the kind of dependency, not the key — and leave the
+// per-key detail to [Breaker.Counts], which nothing samples or caps. The same
+// trap in its metrics-label form is in
+// docs/adr/0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md.
 type Hooks struct {
 	// OnStateChange fires after the circuit changes state (FR-01).
 	OnStateChange func(ctx context.Context, ev StateChangeEvent)

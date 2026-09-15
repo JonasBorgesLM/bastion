@@ -103,3 +103,24 @@ A real consumer need for a maintained adapter — reported friction, a
 cardinality incident traced back to the absence of one, or a concrete
 request — or evidence the documented example is not sufficient guidance in
 practice. Today, neither has been reported.
+
+## Addendum (issue #81)
+
+Nothing in the decision above changes. This records a second place the same
+hazard appears, found by the first real integration analysis.
+
+The cardinality trap this ADR documents for *metrics labels* has an exact twin
+in the *hooks stream*, and the example above does not reach it. `Group` names
+every member after its key, and that name is on every event the hooks emit
+(FR-10) — so a `Group` keyed per tenant emits a per-tenant attribute into
+whatever pipeline the host routes those events into, without anyone having
+written a label at all. A backend that caps distinct values per attribute drops
+it, silently, and the breaker name vanishes from precisely the events a per-key
+breaker existed to distinguish.
+
+Same mistake, same cause, arriving by a route the worked example here does not
+cover: there, a caller chooses a bad label; here, the library supplies a
+high-cardinality value and the caller passes it along without recognising it as
+one. `Hooks`' own godoc and `SECURITY.md`'s Group section carry the guidance;
+this note exists so a reader who arrives at the cardinality paragraph above
+learns that the other case exists.
