@@ -77,16 +77,8 @@ func New(name string, opts ...Option) (*Breaker, error) {
 		return nil, fmt.Errorf("%w: a breaker must be named", ErrInvalidConfig)
 	}
 
-	o := options{
-		failureThreshold: defaultFailureThreshold,
-		openTimeout:      defaultOpenTimeout,
-		halfOpenMaxCalls: defaultHalfOpenMaxCalls,
-		clock:            SystemClock{},
-	}
-	for _, opt := range opts {
-		opt(&o)
-	}
-	if err := o.validate(); err != nil {
+	o, err := buildOptions(opts)
+	if err != nil {
 		return nil, err
 	}
 

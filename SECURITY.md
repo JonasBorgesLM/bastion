@@ -54,6 +54,37 @@ to look for.
   `Err` accordingly on that specific path — nowhere else in bastion's own
   output does this apply.
 
+## Group and adversarial keys
+
+[`Group`](group.go) creates one `*Breaker` per key, on first use. If that
+key comes from something an attacker influences — a tenant id, a `Host`
+header, anything reachable from outside a request — an unbounded `Group`
+is a memory-exhaustion vector: each new garbage key is a new, permanent
+allocation
+([ADR-0019](docs/adr/0019-group-bounds-growth-with-a-required-cap-not-eviction.md)).
+
+`NewGroup` requires a `maxKeys` cap for exactly this reason — it is a
+required positional argument, not a default a caller could leave unset.
+Once a `Group` holds `maxKeys` distinct keys, `Get` for a **new** key
+returns [`ErrGroupFull`](errors.go) rather than growing further; an
+existing key is always still servable, so the cap does not itself create an
+outage for traffic already being served.
+
+**The cap bounds bastion's own memory; it does not make an untrusted key
+space safe to use unfiltered.** A `Group` with `MaxKeys=10000` keyed
+directly by an unauthenticated header still lets an attacker occupy all
+10000 slots with garbage values, denying legitimate ones their own
+breaker — a full but bounded group, not an unbounded one, but still a
+denial of service for real keys arriving after the cap is reached. The cap
+is a backstop against a bug or an oversight, not a substitute for the
+stronger mitigation: validate the key against a known set (drawn from your
+own configuration, not from the request) *before* it ever reaches `Get`,
+wherever the key would otherwise come directly from untrusted input.
+[`Group.Delete`](group.go) lets a host reclaim a key it knows has left for
+good (a tenant offboarded, a host decommissioned); [`Group.Len`](group.go)
+lets a host watch how close it is to the cap before `ErrGroupFull` is the
+first sign of trouble.
+
 ## Supported versions
 
 Pre-1.0. Only the latest tag receives fixes. There are no backports, and there

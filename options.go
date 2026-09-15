@@ -45,6 +45,28 @@ func (o options) validate() error {
 	return nil
 }
 
+// buildOptions assembles opts into a validated options value, starting from
+// the same defaults [New] itself starts from. Shared by [New] and
+// [NewGroup] so the two can never silently drift on what counts as a valid
+// Breaker configuration (ADR-0019) — a Group validates the Option set it
+// will apply to every member once, at construction, exactly the way New
+// validates its own.
+func buildOptions(opts []Option) (options, error) {
+	o := options{
+		failureThreshold: defaultFailureThreshold,
+		openTimeout:      defaultOpenTimeout,
+		halfOpenMaxCalls: defaultHalfOpenMaxCalls,
+		clock:            SystemClock{},
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if err := o.validate(); err != nil {
+		return options{}, err
+	}
+	return o, nil
+}
+
 // Option configures a [Breaker] at construction. See [New].
 type Option func(*options)
 
