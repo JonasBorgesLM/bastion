@@ -20,6 +20,12 @@ import (
 // A Group is safe for concurrent use (NFR-01). Concurrent [Group.Get] calls
 // for the same not-yet-seen key create exactly one *Breaker; every caller
 // observes the same instance.
+//
+// A Group has an observability cost alongside its memory one: every member is
+// named after its key, and that name is in every event the hooks emit (FR-10),
+// so a Group keyed per tenant emits a per-tenant attribute. See [Hooks] for
+// what to send instead when the key space is large, and SECURITY.md for the
+// memory side.
 type Group struct {
 	mu       sync.Mutex
 	breakers map[string]*Breaker

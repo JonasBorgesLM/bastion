@@ -85,6 +85,17 @@ good (a tenant offboarded, a host decommissioned); [`Group.Len`](group.go)
 lets a host watch how close it is to the cap before `ErrGroupFull` is the
 first sign of trouble.
 
+**The same key space has a second cost, in observability rather than memory.**
+Every member of a `Group` is named after its key, and that name is in every
+event the hooks emit (FR-10). A `Group` keyed by anything tenant-scale
+therefore emits a tenant-scale attribute into whatever pipeline the host routes
+those events into — and a backend that caps distinct values per attribute
+responds by dropping it, silently, so the breaker name vanishes from exactly the
+events a per-key breaker existed to distinguish. That is not a vulnerability,
+but it is the same "unbounded key space" mistake arriving somewhere the cap
+above does not reach, and it is worth checking at the same time. See
+[`Hooks`](hooks.go) for what to emit instead.
+
 ## Supported versions
 
 Pre-1.0. Only the latest tag receives fixes. There are no backports, and there
