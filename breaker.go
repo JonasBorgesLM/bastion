@@ -114,6 +114,58 @@ func (b *Breaker) State() State {
 	return b.effectiveState(b.clock.Now())
 }
 
+// Counts is a snapshot of a Breaker's current bookkeeping, taken under the
+// same lock every call already uses (FR-13, NFR-01). It answers what the
+// [Hooks] event stream cannot — what this breaker's state looks like right
+// now — not what has happened over time, which a host already gets exactly
+// by counting [Hooks.OnCall] and [Hooks.OnReject] events
+// (docs/adr/0015-counts-answers-only-what-the-hook-stream-cannot.md).
+type Counts struct {
+	// State is the breaker's current state, including a timeout already
+	// elapsed — the same value [Breaker.State] would return, computed once
+	// so Counts is an internally consistent snapshot rather than several
+	// separately-read fields.
+	State State
+
+	// ConsecutiveFailures counts toward FailureThreshold. Zero unless State
+	// is [StateClosed] (FR-02): a probe or a rejection is not itself a
+	// consecutive failure, and this field is not "how many failures led to
+	// the current state," only "how many more would trip it from here."
+	ConsecutiveFailures int
+
+	// FailureThreshold is the value given to [WithFailureThreshold] (or its
+	// default), included so a caller holding only a Counts value — not the
+	// options [New] was given — can compute how close ConsecutiveFailures is
+	// to tripping the circuit without needing to have kept that number
+	// itself.
+	FailureThreshold int
+
+	// OpenedAt is when the current Open episode began. Zero unless State is
+	// [StateOpen] — not "the last time this breaker was Open," which would
+	// stay stale and misleading long after it recovered.
+	OpenedAt time.Time
+}
+
+// Counts returns a snapshot of b's current bookkeeping (FR-09, FR-13).
+//
+// Every field is already-stored state — Counts adds nothing to Execute's
+// hot path, no new field on Breaker and no new write in admit or complete
+// (docs/adr/0015-counts-answers-only-what-the-hook-stream-cannot.md).
+func (b *Breaker) Counts() Counts {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	eff := b.effectiveState(b.clock.Now())
+	c := Counts{
+		State:               eff,
+		ConsecutiveFailures: b.consecutiveFailures,
+		FailureThreshold:    b.failureThreshold,
+	}
+	if eff == StateOpen {
+		c.OpenedAt = b.openedAt
+	}
+	return c
+}
+
 // effectiveState computes what State() should report right now, without
 // mutating any field. Call with b.mu held.
 func (b *Breaker) effectiveState(now time.Time) State {

@@ -1091,3 +1091,114 @@ func TestExecute_CallableWithoutAnyCallOptions(t *testing.T) {
 		t.Fatalf("Execute() = %d, want 42", got)
 	}
 }
+
+// ADR-0015: a fresh breaker's Counts must reflect exactly what New was
+// given, before any call.
+func TestCounts_ReflectsAFreshBreaker(t *testing.T) {
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(3))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	c := b.Counts()
+	if c.State != bastion.StateClosed {
+		t.Fatalf("Counts().State = %v, want %v", c.State, bastion.StateClosed)
+	}
+	if c.ConsecutiveFailures != 0 {
+		t.Fatalf("Counts().ConsecutiveFailures = %d, want 0", c.ConsecutiveFailures)
+	}
+	if c.FailureThreshold != 3 {
+		t.Fatalf("Counts().FailureThreshold = %d, want 3 (WithFailureThreshold)", c.FailureThreshold)
+	}
+	if !c.OpenedAt.IsZero() {
+		t.Fatalf("Counts().OpenedAt = %v, want the zero value (never Open)", c.OpenedAt)
+	}
+}
+
+// ConsecutiveFailures must track real failures one for one, and reset to
+// zero on a success -- the same rule FR-02 already applies to the internal
+// counter, now observable through Counts.
+func TestCounts_ConsecutiveFailuresTracksFailuresAndResetsOnSuccess(t *testing.T) {
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(5))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	if got := b.Counts().ConsecutiveFailures; got != 2 {
+		t.Fatalf("Counts().ConsecutiveFailures after 2 failures = %d, want 2", got)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp)
+	if got := b.Counts().ConsecutiveFailures; got != 0 {
+		t.Fatalf("Counts().ConsecutiveFailures after a success = %d, want 0", got)
+	}
+}
+
+// ADR-0015's documented contract: ConsecutiveFailures is zero unless State
+// is StateClosed, and OpenedAt is zero unless State is StateOpen -- neither
+// field leaks a stale value from a state the breaker has since left.
+//
+// Negative control: verified failing (OpenedAt non-zero while HalfOpen)
+// against a version of Counts that returned b.openedAt unconditionally
+// instead of only when eff == StateOpen.
+func TestCounts_ZeroesConsecutiveFailuresAndOpenedAtOutsideTheirStates(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep",
+		bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(10*time.Second),
+		bastion.WithClock(clock),
+	)
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	opened := b.Counts()
+	if opened.State != bastion.StateOpen {
+		t.Fatalf("Counts().State after tripping = %v, want %v", opened.State, bastion.StateOpen)
+	}
+	if opened.ConsecutiveFailures != 0 {
+		t.Fatalf("Counts().ConsecutiveFailures while Open = %d, want 0 (only meaningful while Closed)", opened.ConsecutiveFailures)
+	}
+	if opened.OpenedAt.IsZero() {
+		t.Fatal("Counts().OpenedAt while Open must not be the zero value")
+	}
+
+	clock.Advance(10 * time.Second) // openTimeout elapses; no call has happened yet
+	halfOpen := b.Counts()
+	if halfOpen.State != bastion.StateHalfOpen {
+		t.Fatalf("Counts().State after openTimeout elapsed = %v, want %v (computed live, like State())", halfOpen.State, bastion.StateHalfOpen)
+	}
+	if !halfOpen.OpenedAt.IsZero() {
+		t.Fatalf("Counts().OpenedAt while HalfOpen = %v, want the zero value -- must not leak the stale Open-episode time", halfOpen.OpenedAt)
+	}
+}
+
+// A returned Counts is a snapshot, not a live view: taking one and then
+// changing the breaker's real state must leave the earlier value untouched.
+func TestCounts_IsAnIndependentSnapshotNotALiveView(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(1), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+	before := b.Counts()
+
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp) // rejected; Open unaffected by this alone
+	clock.Advance(30 * time.Second)
+	_, _ = bastion.Execute(context.Background(), b, succeedingOp) // probe succeeds; closes the circuit
+
+	if b.Counts().State != bastion.StateClosed {
+		t.Fatalf("Counts().State after the probe succeeded = %v, want %v", b.Counts().State, bastion.StateClosed)
+	}
+	if before.State != bastion.StateOpen {
+		t.Fatalf("the earlier snapshot's State changed to %v after later calls, want it to stay %v", before.State, bastion.StateOpen)
+	}
+	if before.OpenedAt.IsZero() {
+		t.Fatal("the earlier snapshot's OpenedAt changed after later calls, want it to stay non-zero")
+	}
+}
