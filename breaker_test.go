@@ -1069,3 +1069,25 @@ func TestExecute_HalfOpenAllowanceHoldsUnderConcurrentProbes(t *testing.T) {
 		t.Fatalf("State() after a successful probe resolved the window = %v, want %v", got, bastion.StateClosed)
 	}
 }
+
+// ADR-0014: Execute's variadic CallOption parameter must not change behavior
+// for a call that passes none, which is every call site in this file and
+// every call site today -- the entire rest of this suite already proves this
+// by continuing to compile and pass unmodified against the new signature,
+// but this test pins the claim explicitly rather than leaving it implicit.
+func TestExecute_CallableWithoutAnyCallOptions(t *testing.T) {
+	b, err := bastion.New("dep")
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+
+	got, err := bastion.Execute(context.Background(), b, func(context.Context) (int, error) {
+		return 42, nil
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want nil", err)
+	}
+	if got != 42 {
+		t.Fatalf("Execute() = %d, want 42", got)
+	}
+}
