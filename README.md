@@ -173,6 +173,30 @@ validated: a non-positive threshold, timeout, or allowance, or a nil
 breaker that would misbehave later. `WithClock` exists for tests — see
 [`Clock`](clock.go) — hosts leave it at the default `SystemClock`.
 
+### One breaker per key — `Group`
+
+```go
+group, err := bastion.NewGroup(10_000, bastion.WithFailureThreshold(5))
+breaker, err := group.Get("tenant-42") // created on first use, then reused
+```
+
+The shape almost every real consumer needs — one breaker per downstream
+host, per tenant, per endpoint — without hand-writing the same map, mutex,
+and double-checked get-or-create. Every member shares the `Option`s given to
+`NewGroup`; a `Group` a caller constructs and holds is an ordinary value, not
+the global registry IR-03 forbids.
+
+`maxKeys` is required, not optional: a `Group` keyed by anything
+attacker-influenced (a tenant id, a `Host` header) is a memory-exhaustion
+vector otherwise. Once full, `Get` for a **new** key returns
+[`ErrGroupFull`](errors.go) rather than silently evicting an existing
+member's accumulated evidence — an existing key stays servable regardless.
+`group.Delete("tenant-42")` frees a key deliberately; `group.Len()` reports
+how close the group is to its cap. See
+[SECURITY.md](SECURITY.md#group-and-adversarial-keys) for why the cap is a
+backstop, not a substitute for validating the key itself
+([ADR-0019](docs/adr/0019-group-bounds-growth-with-a-required-cap-not-eviction.md)).
+
 ### Retry — `Retry` and `RetryPolicy`
 
 ```go

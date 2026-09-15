@@ -24,6 +24,14 @@ var (
 	// library that panics on configuration takes down a host at startup, or
 	// mid-request, for something the host could have handled (IR-04).
 	ErrInvalidConfig = errors.New("bastion: invalid configuration")
+
+	// ErrGroupFull reports that a [Group] already holds MaxKeys breakers and
+	// [Group.Get] was asked for a key it has not seen before. Returned as a
+	// hard, visible failure rather than silently evicting an existing
+	// member's accumulated evidence (ADR-0019) — call [Group.Delete] to free
+	// a key deliberately, or [Group.Len] to watch how close the group is to
+	// its cap before this happens.
+	ErrGroupFull = errors.New("bastion: group is full")
 )
 
 // A cancelled context is accounted for as neither a success nor a failure
