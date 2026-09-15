@@ -210,6 +210,16 @@ result, err := bastion.Retry(ctx, bastion.RetryPolicy{
 })
 ```
 
+**Check first whether the client you are wrapping already retries.** Most
+production clients do — the AWS SDKs, most gRPC configurations, several
+popular S3 and HTTP clients — and their attempts multiply with these rather
+than replacing them. `MaxAttempts: 3` around a client that makes up to 10
+attempts of its own is **up to 30 round trips**, on two independent backoff
+schedules, against a dependency that is by then already struggling. Where a
+retry layer already exists, prefer it and use `Execute` alone: the client's
+own retry knows which of its errors are worth repeating, which this package
+cannot infer from an error value.
+
 `Retry` composes *around* `Execute`, never inside it — each attempt is its
 own, individually admitted and counted call
 ([ADR-0006](docs/adr/0006-retry-composes-around-the-breaker-not-inside-it.md)).
