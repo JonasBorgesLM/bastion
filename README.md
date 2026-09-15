@@ -153,6 +153,11 @@ err := bastion.Do(ctx, breaker, func(ctx context.Context) error {
 counting, and hook-firing decision exactly — never a second code path that
 could drift from `Execute`'s own.
 
+Both forms above are call-site forms. If your service talks to a repository
+or store *interface* and is not supposed to know what is behind it, the
+breaker does not belong in the service — see
+[Where it goes in a layered app](#where-it-goes-in-a-layered-app--a-decorator).
+
 ### Construct one — `New` and its options
 
 ```go
@@ -197,6 +202,69 @@ how close the group is to its cap. See
 backstop, not a substitute for validating the key itself
 ([ADR-0019](docs/adr/0019-group-bounds-growth-with-a-required-cap-not-eviction.md)).
 
+### Where it goes in a layered app — a decorator
+
+Every example above is the call-site form, and it is the wrong picture for an
+application whose business layer talks to an interface and is not allowed to
+know what is behind it. There, the breaker goes in a **decorator implementing
+the interface the application already has**, constructed at the composition
+root. Nothing above it changes — not the service, not the handlers, not the
+interface itself:
+
+```go
+// The interface is the application's, not this library's.
+type BlobStore interface {
+	Put(ctx context.Context, key string, r io.Reader) error
+	Open(ctx context.Context, key string) (io.ReadCloser, error)
+}
+
+type guardedStore struct {
+	next    BlobStore
+	breaker *bastion.Breaker
+}
+
+func (g *guardedStore) Put(ctx context.Context, key string, r io.Reader) error {
+	return translate(bastion.Do(ctx, g.breaker, func(ctx context.Context) error {
+		return g.next.Put(ctx, key, r)
+	}))
+}
+
+func (g *guardedStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	rc, err := bastion.Execute(ctx, g.breaker, func(ctx context.Context) (io.ReadCloser, error) {
+		return g.next.Open(ctx, key)
+	})
+	return rc, translate(err)
+}
+
+// translate keeps bastion out of every layer above this one: the caller sees
+// the application's own vocabulary, not this library's.
+func translate(err error) error {
+	if errors.Is(err, bastion.ErrOpenState) || errors.Is(err, bastion.ErrTooManyRequests) {
+		return fmt.Errorf("%w: storage is unavailable", ErrUnavailable)
+	}
+	return err
+}
+```
+
+Four things that example is making a point of:
+
+- **`Do` for a method returning only an error, `Execute` for one returning a
+  value.** `Do` exists exactly so this shape does not need a `struct{}{}` at
+  every call site.
+- **Both rejection sentinels are translated**, not just `ErrOpenState`.
+  `ErrTooManyRequests` — the half-open allowance being spent — means the same
+  thing to a caller and is easy to forget, because it only appears in a narrow
+  window.
+- **The translation happens at this boundary**, so no layer above ever imports
+  bastion. Map the application's own sentinel to `503` with `Retry-After` at the
+  edge, never `500` — an open circuit is a temporary refusal, and a `500` tells
+  the caller to give up when it should tell them to come back.
+- **Wrap only the implementation that can actually fail this way.** The same
+  interface usually has a local or in-memory implementation too; putting a
+  breaker in front of one adds a failure mode to a path that had none. Decorate
+  at the composition root, where the choice between them is already being made —
+  not the interface in general.
+
 ### Retry — `Retry` and `RetryPolicy`
 
 ```go
@@ -209,6 +277,16 @@ result, err := bastion.Retry(ctx, bastion.RetryPolicy{
 	return bastion.Execute(ctx, breaker, realOp)
 })
 ```
+
+**Check first whether the client you are wrapping already retries.** Most
+production clients do — the AWS SDKs, most gRPC configurations, several
+popular S3 and HTTP clients — and their attempts multiply with these rather
+than replacing them. `MaxAttempts: 3` around a client that makes up to 10
+attempts of its own is **up to 30 round trips**, on two independent backoff
+schedules, against a dependency that is by then already struggling. Where a
+retry layer already exists, prefer it and use `Execute` alone: the client's
+own retry knows which of its errors are worth repeating, which this package
+cannot infer from an error value.
 
 `Retry` composes *around* `Execute`, never inside it — each attempt is its
 own, individually admitted and counted call

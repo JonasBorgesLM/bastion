@@ -163,6 +163,22 @@ func sleepRespectingContext(ctx context.Context, d time.Duration) error {
 // the last attempt's error once p.MaxAttempts is reached, or the first
 // attempt whose error p.IsRetriable rejects (FR-06).
 //
+// # Check first whether the client being wrapped already retries
+//
+// Most production clients worth guarding retry on their own, and their
+// attempts multiply with these rather than replacing them: MaxAttempts of 3
+// around a client that makes up to 10 attempts of its own is up to 30 round
+// trips, on two independent backoff schedules, against a dependency that is by
+// then already struggling. The library does exactly what it was asked; the ask
+// is what was wrong, and neither the compiler nor the policy's own validation
+// can catch it.
+//
+// The AWS SDKs, most gRPC configurations, and several popular S3 and HTTP
+// clients all retry by default. Check before adding a second layer. Where one
+// already exists, prefer it and reach for [Execute] alone here: the client's
+// own retry knows which of its errors are worth repeating, which is knowledge
+// this package does not have and cannot infer from an error value.
+//
 // Retry has no notion of a [Breaker] and touches none of a Breaker's counters
 // — it composes with one entirely by nesting at the call site, and the
 // library's own recommendation (docs/adr/0006-retry-composes-around-the-breaker-not-inside-it.md)

@@ -158,6 +158,15 @@ type Counts struct {
 // Every field is already-stored state — Counts adds nothing to Execute's
 // hot path, no new field on Breaker and no new write in admit or complete
 // (docs/adr/0015-counts-answers-only-what-the-hook-stream-cannot.md).
+//
+// Publish this on a metrics or debug surface, not on a readiness probe. An
+// open circuit is a handled failure — the calls it refuses cost nanoseconds
+// and every route not touching that dependency is still being served — so
+// reporting not-ready over it removes the instance for the one thing the
+// breaker is already degrading around, and converts a partial outage into a
+// total one (docs/adr/0020-breaker-state-does-not-gate-readiness.md, which
+// argues both the single- and multi-replica cases). Readiness answers a
+// scheduler; this answers an operator.
 func (b *Breaker) Counts() Counts {
 	b.mu.Lock()
 	defer b.mu.Unlock()

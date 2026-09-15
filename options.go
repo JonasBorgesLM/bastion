@@ -103,6 +103,57 @@ func WithHalfOpenMaxCalls(n int) Option {
 // Done when the operation returned — that case counts as neither a success
 // nor a failure regardless of what fn would have said, decided before fn is
 // ever reached (FR-05, ADR-0005).
+//
+// # Name what is broken, never what is fine
+//
+// Write fn as an allowlist — "these specific errors mean the dependency is
+// broken" — and not as an exclusion list — "everything except these known-good
+// errors". The two look interchangeable and fail in opposite directions:
+//
+//   - An allowlist that misses a case under-trips. The missed error stops
+//     counting as evidence, which is the behaviour of no breaker at all: the
+//     worst outcome is that a real outage takes longer to be noticed.
+//   - An exclusion list that misses a case over-trips. The missed error becomes
+//     counted evidence against a dependency that is working, and the circuit
+//     opens on it. That is an outage this library caused.
+//
+// The asymmetry is the whole argument. Both lists are incomplete in practice —
+// nobody enumerates every error a real dependency can produce — so the question
+// is never "which one is complete" but "which one is safe while incomplete".
+//
+// # Why the default is the permissive one, and when it stops being right
+//
+// Counting every non-nil error is correct for an operation whose errors all
+// come from one place: a bare HTTP client returning transport errors, a
+// connection that either works or does not. Nothing a caller passed in can
+// reach the classifier, so nothing a caller passed in can trip the circuit.
+//
+// It stops being right the moment the guarded operation shares a return path
+// between the dependency's failures and the caller's own mistakes. A repository
+// is the usual example — a malformed identifier and a refused connection both
+// arrive as an error from the same call — and against that shape the default
+// lets an attacker, or a buggy client, open the circuit on a healthy database by
+// sending bad input in a loop:
+//
+//	bastion.WithIsFailure(func(err error) bool {
+//		// Infrastructure: the dependency itself is the problem.
+//		var pgErr *pgconn.PgError
+//		if errors.As(err, &pgErr) {
+//			switch pgErr.Code[:2] {
+//			case "08", // connection exception
+//				"53", // insufficient resources
+//				"57": // operator intervention
+//				return true
+//			}
+//			return false // every other SQLSTATE is an answer, not a fault
+//		}
+//		return errors.Is(err, driver.ErrBadConn) ||
+//			errors.Is(err, context.DeadlineExceeded) // waiting for a pooled connection
+//	})
+//
+// Note what that classifier does with an error it has never seen: it returns
+// false. A new failure mode is ignored until somebody adds it, rather than
+// silently becoming grounds to open the circuit.
 func WithIsFailure(fn func(error) bool) Option {
 	return func(o *options) { o.isFailure = fn }
 }
