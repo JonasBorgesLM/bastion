@@ -639,3 +639,23 @@ func Execute[T any](
 	}
 	return result, opErr
 }
+
+// Do runs op through b exactly as [Execute] does, for an operation that
+// returns only an error — a publish, a delete, a fire-and-forget write,
+// which is a large share of what gets guarded and has no result worth
+// naming a type for (issue #57).
+//
+// Do is a thin wrapper around Execute[struct{}] — every admission, counting,
+// and hook-firing decision is Execute's own, so the two can never drift
+// apart into two behaviors for what is really one operation. See Execute's
+// own godoc for the full contract this shares exactly, including how a
+// panic, a cancelled context, and opts are handled.
+func Do(
+	ctx context.Context, b *Breaker, op func(context.Context) error,
+	opts ...CallOption,
+) error {
+	_, err := Execute(ctx, b, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, op(ctx)
+	}, opts...)
+	return err
+}

@@ -139,6 +139,20 @@ A context the caller cancels counts as neither a success nor a failure
 per-call option and empty today — there is nothing to pass yet
 ([ADR-0014](docs/adr/0014-execute-gains-an-empty-call-option-slot.md)).
 
+For an operation that returns only an error — a publish, a delete, a
+fire-and-forget write — `Do` skips inventing a result type to satisfy
+`Execute`'s generic:
+
+```go
+err := bastion.Do(ctx, breaker, func(ctx context.Context) error {
+	return realOp(ctx)
+})
+```
+
+`Do` is a thin wrapper around `Execute[struct{}]`, sharing every admission,
+counting, and hook-firing decision exactly — never a second code path that
+could drift from `Execute`'s own.
+
 ### Construct one — `New` and its options
 
 ```go
