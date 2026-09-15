@@ -324,6 +324,20 @@ func runHookSafely(fn func()) (panicValue any) {
 	return nil
 }
 
+// callOptions accumulates [CallOption] values for a single call to [Execute].
+// Deliberately empty — no option is defined yet (ADR-0014). It exists so a
+// future option is a compatible addition: a new field here and a new
+// WithXxx constructor, never a change to Execute's own signature.
+type callOptions struct{}
+
+// CallOption customizes a single call to [Execute]. No option is defined
+// yet; see docs/adr/0014-execute-gains-an-empty-call-option-slot.md for why
+// the slot exists anyway. callOptions is unexported, so no caller outside
+// this package can construct a non-nil CallOption today — passing none is
+// the only thing to do with this parameter until a WithXxx constructor is
+// added.
+type CallOption func(*callOptions)
+
 // Execute runs op through b: admitted immediately in [StateClosed], admitted
 // as a bounded probe in [StateHalfOpen], and refused without invoking op in
 // [StateOpen] — returning [ErrOpenState] or [ErrTooManyRequests] (ADR-0001).
@@ -368,7 +382,18 @@ func runHookSafely(fn func()) (panicValue any) {
 // probe that never returns cannot strand the circuit (FR-12, ADR-0004), but a
 // bounded probe recovers on its own without ever admitting a second,
 // overlapping one.
-func Execute[T any](ctx context.Context, b *Breaker, op func(context.Context) (T, error)) (T, error) {
+//
+// opts is reserved for future per-call options (ADR-0014); no option is
+// defined yet, and every call site today correctly passes none.
+func Execute[T any](
+	ctx context.Context, b *Breaker, op func(context.Context) (T, error),
+	opts ...CallOption,
+) (T, error) {
+	var o callOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	var zero T
 
 	adm := b.admit(b.clock.Now())

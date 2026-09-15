@@ -135,6 +135,10 @@ value once the breaker's own bookkeeping is done
 A context the caller cancels counts as neither a success nor a failure
 ([ADR-0005](docs/adr/0005-context-cancellation-is-detected-by-reading-the-outer-ctx.md)).
 
+`Execute` also takes a trailing `...CallOption`, reserved for a future
+per-call option and empty today — there is nothing to pass yet
+([ADR-0014](docs/adr/0014-execute-gains-an-empty-call-option-slot.md)).
+
 ### Construct one — `New` and its options
 
 ```go
