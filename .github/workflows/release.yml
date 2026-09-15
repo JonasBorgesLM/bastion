@@ -153,6 +153,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Both scoped to this one job: it runs only on a tag push already
+      # gated by verify (ADR-0013).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,6 +180,27 @@ jobs:
           git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/allowed_signers"
           git verify-tag '${{ github.ref_name }}'
 
+      # ADR-0013: a plain (uncompressed) tarball of the exact tagged tree --
+      # not a binary bastion does not produce, and not the zip
+      # proxy.golang.org independently assembles for `go get`. Uncompressed
+      # so the attested subject has one less source of byte-level variance
+      # (gzip header metadata) between this run and a consumer's own
+      # `git archive` reproduction.
+      - name: Produce the source tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          git archive --format=tar --prefix="bastion-${TAG}/" \
+            --output="$RUNNER_TEMP/dist/bastion-${TAG}.tar" "$TAG"
+
+      # Attests that this exact tarball, by digest, was produced by this
+      # workflow run at this commit -- after verify's gates already passed,
+      # since this job needs: verify (ADR-0013).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/bastion-${{ github.ref_name }}.tar
+
       - name: Assemble release notes
         run: |
           diff_file=$(find "$RUNNER_TEMP/artifacts" -type f -name apidiff.txt -print -quit)
@@ -198,16 +223,20 @@ jobs:
             cat "$diff_file"
             printf '```\n\n'
             printf 'Requirements: [REQUIREMENTS.md](REQUIREMENTS.md) — '
-            printf 'Decisions: [docs/adr](docs/adr/README.md)\n'
+            printf 'Decisions: [docs/adr](docs/adr/README.md)\n\n'
+            printf 'Provenance: `bastion-%s.tar` below is attested -- see ' \
+              '${{ github.ref_name }}'
+            printf '[SECURITY.md](SECURITY.md#provenance) to verify it.\n'
           } > "$notes"
           cat "$notes"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create '${{ github.ref_name }}' \
+          gh release create "$TAG" "$RUNNER_TEMP/dist/bastion-${TAG}.tar" \
             --repo '${{ github.repository }}' \
-            --title "bastion ${{ github.ref_name }}" \
+            --title "bastion $TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --verify-tag
