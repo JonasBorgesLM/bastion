@@ -37,6 +37,12 @@ type Breaker struct {
 	// probe is due (FR-01, NFR-05).
 	openedAt time.Time
 
+	// manualTrip is true exactly while a Trip call is in effect and Reset has
+	// not yet cleared it. Checked first in effectiveState, before openedAt
+	// and openTimeout are even consulted: unlike an evidence-driven Open, a
+	// manual trip does not expire on its own (ADR-0017).
+	manualTrip bool
+
 	// halfOpenInFlight counts probes admitted and not yet completed, bounded
 	// by halfOpenMaxCalls.
 	halfOpenInFlight int
@@ -144,6 +150,15 @@ type Counts struct {
 	// [StateOpen] — not "the last time this breaker was Open," which would
 	// stay stale and misleading long after it recovered.
 	OpenedAt time.Time
+
+	// Manual reports whether the current Open episode is a standing
+	// [Breaker.Trip] rather than one evidence derived (ADR-0017). False
+	// unless State is [StateOpen]. Poll this rather than relying on catching
+	// [Hooks.OnStateChange]'s own Manual field at the right moment — a
+	// manual trip is ongoing state, and this answers "is it still in effect
+	// right now" independent of whether a handler was listening when it
+	// began.
+	Manual bool
 }
 
 // Counts returns a snapshot of b's current bookkeeping (FR-09, FR-13).
@@ -162,13 +177,79 @@ func (b *Breaker) Counts() Counts {
 	}
 	if eff == StateOpen {
 		c.OpenedAt = b.openedAt
+		c.Manual = b.manualTrip
 	}
 	return c
+}
+
+// Trip forces the circuit to [StateOpen] immediately, regardless of its
+// current state or accumulated evidence. Unlike an evidence-driven Open, a
+// manual trip does not expire on [WithOpenTimeout] — it rejects every call
+// with [ErrOpenState] until [Breaker.Reset] is called (ADR-0017).
+//
+// Calling Trip again while the circuit is already Open — evidence-driven or
+// already manually tripped — re-affirms the trip (the episode [Breaker.Counts]
+// reports via OpenedAt restarts from now) without firing a second
+// [Hooks.OnStateChange]: From and To would both be StateOpen, and a
+// transition whose state does not actually change does not emit an event,
+// the same rule every other transition already follows. A [Hooks.OnStateChange]
+// with Manual true fires only when this call actually changes the circuit's
+// raw state.
+func (b *Breaker) Trip(ctx context.Context) {
+	b.mu.Lock()
+	from := b.state
+	b.state = StateOpen
+	b.openedAt = b.clock.Now()
+	b.manualTrip = true
+	b.halfOpenGeneration++ // ADR-0004: any in-flight probe is now stale
+	b.halfOpenInFlight = 0
+	var ev *StateChangeEvent
+	if from != StateOpen {
+		ev = &StateChangeEvent{Name: b.name, From: from, To: StateOpen, Manual: true}
+	}
+	b.mu.Unlock()
+
+	if ev != nil {
+		b.fireStateChange(ctx, ev)
+	}
+}
+
+// Reset clears everything a manual trip or accumulated evidence left
+// behind — any standing [Breaker.Trip], [Counts.ConsecutiveFailures], and
+// the circuit's state — unconditionally to [StateClosed] (ADR-0017). It is
+// how a confirmed fix is told to the breaker immediately, without waiting
+// out [WithOpenTimeout] or the Half-Open probe it would otherwise admit
+// first.
+//
+// A [Hooks.OnStateChange] with Manual true fires only if the circuit was not
+// already Closed.
+func (b *Breaker) Reset(ctx context.Context) {
+	b.mu.Lock()
+	from := b.state
+	b.state = StateClosed
+	b.consecutiveFailures = 0
+	b.manualTrip = false
+	b.halfOpenGeneration++ // ADR-0004: any in-flight probe is now stale
+	b.halfOpenInFlight = 0
+	var ev *StateChangeEvent
+	if from != StateClosed {
+		ev = &StateChangeEvent{Name: b.name, From: from, To: StateClosed, Manual: true}
+	}
+	b.mu.Unlock()
+
+	if ev != nil {
+		b.fireStateChange(ctx, ev)
+	}
 }
 
 // effectiveState computes what State() should report right now, without
 // mutating any field. Call with b.mu held.
 func (b *Breaker) effectiveState(now time.Time) State {
+	if b.manualTrip {
+		// ADR-0017: sticky until Reset -- openedAt/openTimeout are not
+		// consulted at all while a manual trip is in effect.
+		return StateOpen
+	}
 	switch b.state {
 	case StateOpen:
 		if now.Sub(b.openedAt) >= b.openTimeout {

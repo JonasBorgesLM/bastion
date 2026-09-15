@@ -46,6 +46,12 @@ type StateChangeEvent struct {
 
 	From State
 	To   State
+
+	// Manual reports whether this transition came from [Breaker.Trip] or
+	// [Breaker.Reset] rather than from evidence -- a threshold crossed, a
+	// timeout elapsing, a probe's own outcome (ADR-0017). False on every
+	// automatic transition.
+	Manual bool
 }
 
 // CallEvent describes a call the breaker admitted and that has now finished.
