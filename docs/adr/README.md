@@ -33,6 +33,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0015`](0015-counts-answers-only-what-the-hook-stream-cannot.md) | Counts answers only what the hook stream cannot, and adds nothing to the hot path | Accepted | — |
 | [`0016`](0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md) | The single-mutex throughput ceiling is measured and accepted, not optimized away | Accepted | — |
 | [`0017`](0017-manual-trip-and-reset.md) | Manual Trip is sticky until Reset; Reset clears everything; both are visible as Manual | Accepted | — |
+| [`0018`](0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md) | A metrics adapter is a documented pattern, not a shipped satellite module | Accepted | — |
 
 ## Open questions
 
@@ -55,11 +56,11 @@ was resolved. [ADR-0010](0010-a-hook-panic-never-corrupts-bookkeeping.md),
 [ADR-0014](0014-execute-gains-an-empty-call-option-slot.md),
 [ADR-0015](0015-counts-answers-only-what-the-hook-stream-cannot.md),
 [ADR-0016](0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md),
-and
-[ADR-0017](0017-manual-trip-and-reset.md)
+[ADR-0017](0017-manual-trip-and-reset.md), and
+[ADR-0018](0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md)
 are not answers to questions from this table — they answer defects and
 open items the B9/B10 audit found (issues #46, #47/#48, #49, #51, #52, #53,
-#55, and #54), not questions deferred from an earlier phase.
+#55, #54, and #58), not questions deferred from an earlier phase.
 Four blocked B1 — the entry point's name and signature, the
 static-versus-adaptive threshold, panic accounting, and stale half-open
 recovery ([ADR-0001](0001-entry-point-is-a-free-generic-function-named-execute.md)
