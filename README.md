@@ -255,6 +255,68 @@ the calling goroutine — route them into your own metrics or logging
 pipeline asynchronously from there, since a slow handler here blocks the
 request behind it.
 
+#### A worked example: wiring `Hooks` to Prometheus
+
+No metrics library appears in this module (NFR-03), and none ships as a
+separate adapter module either — `Hooks` is already a complete, sufficient
+extension point, and the actual gap is a correct example rather than a
+missing mechanism
+([ADR-0018](docs/adr/0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md)).
+This is the shape, using `prometheus/client_golang`:
+
+```go
+var (
+	callsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "breaker_calls_total",
+	}, []string{"breaker", "state", "outcome"})
+
+	rejectsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "breaker_rejects_total",
+	}, []string{"breaker", "state"})
+
+	stateChangesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "breaker_state_changes_total",
+	}, []string{"breaker", "from", "to"})
+)
+
+hooks := bastion.Hooks{
+	OnCall: func(_ context.Context, ev bastion.CallEvent) {
+		outcome := "success"
+		if ev.Err != nil {
+			outcome = "failure"
+		}
+		callsTotal.With(prometheus.Labels{
+			"breaker": ev.Name, "state": ev.State.String(), "outcome": outcome,
+		}).Inc()
+	},
+	OnReject: func(_ context.Context, ev bastion.RejectEvent) {
+		rejectsTotal.With(prometheus.Labels{
+			"breaker": ev.Name, "state": ev.State.String(),
+		}).Inc()
+	},
+	OnStateChange: func(_ context.Context, ev bastion.StateChangeEvent) {
+		stateChangesTotal.With(prometheus.Labels{
+			"breaker": ev.Name, "from": ev.From.String(), "to": ev.To.String(),
+		}).Inc()
+	},
+}
+```
+
+**The point of this example is the label set, not the wiring.** Every label
+above — `breaker` (a name an operator chose at construction, one per
+dependency, not per call), `state`, `outcome`, `from`, `to` — is drawn from
+a small, fixed vocabulary. This is what keeps a time series count bounded
+regardless of how long the process runs or how much traffic it serves. The
+mistake this example exists to head off is reaching for `ev.Err.Error()` as
+a label: an error string is effectively unbounded — every distinct message
+a dependency ever produces becomes its own permanent time series in
+whatever backend is scraping this, and *that* is the specific way a metrics
+backend falls over (issue #58). If per-error-type breakdown is genuinely
+needed, classify `ev.Err` into a small, fixed set of reasons first (the same
+discipline [`WithIsFailure`](#construct-one--new-and-its-options) already
+applies to counting) and use the classified value as the label, never the
+raw error text.
+
 ## Design shape
 
 One flat package. No subpackage until something earns one.
