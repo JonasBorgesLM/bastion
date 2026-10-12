@@ -36,6 +36,7 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0018`](0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md) | A metrics adapter is a documented pattern, not a shipped satellite module | Accepted | — |
 | [`0019`](0019-group-bounds-growth-with-a-required-cap-not-eviction.md) | Group bounds growth with a required cap and an explicit error, not eviction | Accepted | — |
 | [`0020`](0020-breaker-state-does-not-gate-readiness.md) | Breaker state does not gate a readiness probe | Accepted | — |
+| [`0021`](0021-a-bad-result-is-classified-by-the-operation-not-by-an-option.md) | A bad result is classified by the operation, not by an option | Accepted | — |
 
 ## Open questions
 
