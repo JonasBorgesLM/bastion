@@ -138,6 +138,15 @@ type Counts struct {
 	// itself.
 	FailureThreshold int
 
+	// OpenTimeout is the value given to [WithOpenTimeout] (or its default),
+	// included for the same reason as FailureThreshold: a caller holding only
+	// a Counts value can tell when an evidence-driven Open episode ends.
+	// OpenedAt.Add(OpenTimeout) is the instant the circuit goes Half-Open and
+	// admits its next probe — the honest value for an HTTP Retry-After on an
+	// [ErrOpenState] rejection (#84). It does not apply while Manual is true:
+	// a manual trip has no timeout (ADR-0017).
+	OpenTimeout time.Duration
+
 	// OpenedAt is when the current Open episode began. Zero unless State is
 	// [StateOpen] — not "the last time this breaker was Open," which would
 	// stay stale and misleading long after it recovered.
@@ -175,6 +184,7 @@ func (b *Breaker) Counts() Counts {
 		State:               eff,
 		ConsecutiveFailures: b.consecutiveFailures,
 		FailureThreshold:    b.failureThreshold,
+		OpenTimeout:         b.openTimeout,
 	}
 	if eff == StateOpen {
 		c.OpenedAt = b.openedAt

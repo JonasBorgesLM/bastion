@@ -150,3 +150,24 @@ A concrete case surfaces where counting hook events is not a viable way to
 get a total or a since-Open count — a host that cannot wire hooks at all,
 say, or a correctness argument that event-counting can drift from bastion's
 own internal total in some case this ADR did not consider. Today, none has.
+
+## Amendment (#84)
+`Counts` gains `OpenTimeout`, the value given to `WithOpenTimeout` (or its
+default), on the same grounds `FailureThreshold` is already there: a caller
+holding only a `Counts` value can use it without having kept the option it
+passed to `New`. The use that surfaced it is usher's gateway (usher/ADR-0016).
+It maps `ErrOpenState` to `503` with `Retry-After`, and the honest value is
+"until `OpenedAt.Add(OpenTimeout)`", the instant the circuit goes Half-Open.
+Without the field, usher hard-coded 30, the default, which is right only by
+coincidence and wrong for any breaker built with another timeout.
+
+This stays inside the line the Decision above draws. `openTimeout` is
+already-stored configuration; nothing new is written on `admit` or
+`complete`, so `Execute`'s hot path is unchanged and `docs/benchmarks.md`
+needs no new numbers. It is not derivable from the hook stream, because no
+event carries the configured timeout.
+
+Not added: a `RetryAt` field. It would bake one retry policy into the library:
+what a caller rejected with `ErrTooManyRequests` during Half-Open should do has
+no single right answer, and `OpenedAt` is zero there by design. The host
+composes the instant it needs from the two fields.

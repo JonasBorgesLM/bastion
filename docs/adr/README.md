@@ -30,12 +30,13 @@ named `0000-` so it does not read as a decision or trip the index check.
 | [`0012`](0012-retrys-total-elapsed-time-is-bounded-by-the-callers-context.md) | Retry's total elapsed time is bounded by the caller's context, not a MaxElapsedTime field | Accepted | — |
 | [`0013`](0013-provenance-attests-the-source-tree-not-a-compiled-artifact.md) | Provenance attests a reproducible source tarball, not a compiled artifact | Accepted | — |
 | [`0014`](0014-execute-gains-an-empty-call-option-slot.md) | Execute gains an empty CallOption slot; Retry and Fallback do not | Accepted | — |
-| [`0015`](0015-counts-answers-only-what-the-hook-stream-cannot.md) | Counts answers only what the hook stream cannot, and adds nothing to the hot path | Accepted | — |
+| [`0015`](0015-counts-answers-only-what-the-hook-stream-cannot.md) | Counts answers only what the hook stream cannot, and adds nothing to the hot path | Accepted | `#84` |
 | [`0016`](0016-the-single-mutex-throughput-ceiling-is-accepted-not-optimized.md) | The single-mutex throughput ceiling is measured and accepted, not optimized away | Accepted | — |
 | [`0017`](0017-manual-trip-and-reset.md) | Manual Trip is sticky until Reset; Reset clears everything; both are visible as Manual | Accepted | — |
 | [`0018`](0018-a-metrics-adapter-is-a-documented-pattern-not-a-shipped-module.md) | A metrics adapter is a documented pattern, not a shipped satellite module | Accepted | — |
 | [`0019`](0019-group-bounds-growth-with-a-required-cap-not-eviction.md) | Group bounds growth with a required cap and an explicit error, not eviction | Accepted | — |
 | [`0020`](0020-breaker-state-does-not-gate-readiness.md) | Breaker state does not gate a readiness probe | Accepted | — |
+| [`0021`](0021-a-bad-result-is-classified-by-the-operation-not-by-an-option.md) | A bad result is classified by the operation, not by an option | Accepted | — |
 
 ## Open questions
 
