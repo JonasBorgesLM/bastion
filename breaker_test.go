@@ -1225,3 +1225,51 @@ func TestCounts_IsAnIndependentSnapshotNotALiveView(t *testing.T) {
 		t.Fatal("the earlier snapshot's OpenedAt changed after later calls, want it to stay non-zero")
 	}
 }
+
+// TestCounts_OpenTimeoutLetsAHostComputeWhenTheCircuitHalfOpens is #84: with
+// OpenTimeout in the snapshot, OpenedAt.Add(OpenTimeout) is exactly the
+// instant the circuit goes Half-Open — what an HTTP host needs for an honest
+// Retry-After on ErrOpenState, instead of a hard-coded guess.
+//
+// Negative control: with OpenTimeout left out of Counts(), this test failed —
+// Counts().OpenTimeout was 0s instead of 5s. Verified by hand, restored
+// before committing.
+func TestCounts_OpenTimeoutLetsAHostComputeWhenTheCircuitHalfOpens(t *testing.T) {
+	clock := newFakeClock()
+	b, err := bastion.New("dep", bastion.WithFailureThreshold(1),
+		bastion.WithOpenTimeout(5*time.Second), bastion.WithClock(clock))
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	_, _ = bastion.Execute(context.Background(), b, failingOp)
+
+	c := b.Counts()
+	if c.State != bastion.StateOpen {
+		t.Fatalf("Counts().State = %v, want %v", c.State, bastion.StateOpen)
+	}
+	if c.OpenTimeout != 5*time.Second {
+		t.Fatalf("Counts().OpenTimeout = %v, want 5s (WithOpenTimeout)", c.OpenTimeout)
+	}
+
+	halfOpenAt := c.OpenedAt.Add(c.OpenTimeout)
+	clock.Advance(halfOpenAt.Sub(clock.Now()) - time.Nanosecond)
+	if got := b.State(); got != bastion.StateOpen {
+		t.Fatalf("State() 1ns before OpenedAt+OpenTimeout = %v, want %v", got, bastion.StateOpen)
+	}
+	clock.Advance(time.Nanosecond)
+	if got := b.State(); got != bastion.StateHalfOpen {
+		t.Fatalf("State() at OpenedAt+OpenTimeout = %v, want %v", got, bastion.StateHalfOpen)
+	}
+}
+
+// The default open timeout is reported too, not only an explicit one — a
+// host that never called WithOpenTimeout still gets a usable value.
+func TestCounts_OpenTimeoutReportsTheDefault(t *testing.T) {
+	b, err := bastion.New("dep")
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	if got := b.Counts().OpenTimeout; got <= 0 {
+		t.Fatalf("Counts().OpenTimeout = %v, want the positive default", got)
+	}
+}
