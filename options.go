@@ -154,6 +154,17 @@ func WithHalfOpenMaxCalls(n int) Option {
 // Note what that classifier does with an error it has never seen: it returns
 // false. A new failure mode is ignored until somebody adds it, rather than
 // silently becoming grounds to open the circuit.
+//
+// # A bad result is not an error
+//
+// fn only ever sees the error the operation returns, never its result. An
+// operation that reports failure through a value instead — an HTTP client
+// returning a response with status 503 and a nil error — counts as a success
+// on every call, and the circuit never opens against a dependency that is up
+// but failing. Turn the result into an error inside the operation, and unwrap
+// it after [Execute] if the caller still wants the result; see
+// ExampleExecute_resultAsFailure. That is a documented pattern rather than an
+// option on purpose (ADR-0021).
 func WithIsFailure(fn func(error) bool) Option {
 	return func(o *options) { o.isFailure = fn }
 }
